@@ -110,6 +110,15 @@ export function getPermissionRequestByEventId(
     .get(eventId, 'pending') as PermissionRequest | undefined
 }
 
+export function expireSessionPermissions(
+  db: Database.Database,
+  sessionId: string,
+): void {
+  db.prepare(
+    'UPDATE permission_requests SET status = ?, resolved_at = ? WHERE session_id = ? AND status = ?',
+  ).run('expired', new Date().toISOString(), sessionId, 'pending')
+}
+
 export function resolvePermissionRequest(
   db: Database.Database,
   requestId: string,

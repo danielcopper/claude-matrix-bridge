@@ -8,9 +8,17 @@ import type Database from 'better-sqlite3'
 import type { Logger } from 'pino'
 import type { Config } from './config.js'
 import type { Session, SSEEvent } from './types.js'
-import { getConfig, setConfig, getSessionByRoomId, updateSession } from './database.js'
+import {
+  getConfig,
+  setConfig,
+  getSessionByRoomId,
+  updateSession,
+  createPermissionRequest,
+  getPermissionRequestByEventId,
+  resolvePermissionRequest,
+} from './database.js'
+import { sendPermission, sendMessage } from './relay-client.js'
 import { handleCommand } from './command-handler.js'
-import { sendMessage } from './relay-client.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 
 export function createBot(config: Config, logger: Logger): MatrixClient {
@@ -135,14 +143,181 @@ export function handleSSEEvent(
     }
 
     case 'permission_request': {
-      // Permission handling comes in PR 2c
-      logger.info(
-        { session: session.name, requestId: event.request_id, tool: event.tool_name },
-        'Permission request (not implemented yet — auto-allowing)',
-      )
+      void (async () => {
+        try {
+          const msg = [
+            `**Permission Request** [${event.request_id}]`,
+            `Tool: \`${event.tool_name}\``,
+            `${event.description}`,
+          ].join('\n')
+          const { body: plain, formatted_body } = formatMarkdown(msg)
+          const eventId = await client.sendMessage(roomId, {
+            msgtype: 'm.text',
+            body: plain,
+            format: 'org.matrix.custom.html',
+            formatted_body,
+          })
+          createPermissionRequest(db, {
+            request_id: event.request_id,
+            session_id: session.id,
+            event_id: eventId,
+            tool_name: event.tool_name,
+            description: event.description,
+            status: 'pending',
+            created_at: new Date().toISOString(),
+            resolved_at: null,
+          })
+          logger.info(
+            { session: session.name, requestId: event.request_id, tool: event.tool_name },
+            'Permission request posted',
+          )
+        } catch (err) {
+          logger.error({ err, session: session.name }, 'Failed to post permission request')
+        }
+      })()
       break
     }
   }
+}
+
+// --- Shared permission verdict logic ---
+
+async function sendPermissionVerdict(
+  permReq: import('./types.js').PermissionRequest,
+  behavior: 'allow' | 'deny',
+  port: number,
+  roomId: string,
+  client: MatrixClient,
+  db: Database.Database,
+  logger: Logger,
+): Promise<void> {
+  await sendPermission(port, permReq.request_id, behavior)
+  resolvePermissionRequest(db, permReq.request_id, behavior === 'allow' ? 'allowed' : 'denied')
+  const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
+  await client.sendText(roomId, `${label} — ${permReq.tool_name}`)
+  logger.info(
+    { requestId: permReq.request_id, behavior, tool: permReq.tool_name },
+    'Permission verdict sent',
+  )
+}
+
+// --- Permission verdict via single-word text ---
+
+const ALLOW_WORDS = new Set(['yes', 'ja', 'jap', 'jo', 'sure', 'yep', 'yup', 'ok', 'okay', 'mach', 'klar', 'passt', 'allow', 'y', 'si', 'oui'])
+const DENY_WORDS = new Set(['no', 'nein', 'ne', 'nope', 'nah', 'deny', 'stop', 'n', 'nicht', 'lass'])
+
+function stripPunctuation(s: string): string {
+  return s.replaceAll(/[^a-zA-ZäöüÄÖÜß]/g, '')
+}
+
+function tryTextPermissionVerdict(
+  body: string,
+  session: Session,
+  db: Database.Database,
+  client: MatrixClient,
+  roomId: string,
+  logger: Logger,
+): boolean {
+  if (body.includes(' ')) return false
+
+  const pendingAll = db.prepare(
+    'SELECT * FROM permission_requests WHERE session_id = ? AND status = ? ORDER BY created_at DESC',
+  ).all(session.id, 'pending') as import('./types.js').PermissionRequest[]
+  if (pendingAll.length === 0) return false
+
+  const word = stripPunctuation(body.toLowerCase().trim())
+  if (!ALLOW_WORDS.has(word) && !DENY_WORDS.has(word)) return false
+
+  const pending = pendingAll[0]
+  const behavior = ALLOW_WORDS.has(word) ? 'allow' as const : 'deny' as const
+  const sessionPort = session.port
+  if (!sessionPort || !pending) return false
+
+  // Warn if multiple permissions are pending
+  if (pendingAll.length > 1) {
+    void client.sendText(roomId,
+      `Note: ${pendingAll.length} permissions pending. Responding to the most recent: \`${pending.tool_name}\``,
+    )
+  }
+
+  void (async () => {
+    try {
+      await sendPermissionVerdict(pending, behavior, sessionPort, roomId, client, db, logger)
+    } catch (err) {
+      logger.error({ err, requestId: pending.request_id }, 'Failed to send permission verdict')
+    }
+  })()
+  return true
+}
+
+// --- Control room message handler ---
+
+function handleControlRoomMessage(
+  body: string,
+  client: MatrixClient,
+  db: Database.Database,
+  config: Config,
+  controlRoomId: string,
+  logger: Logger,
+): void {
+  if (body.startsWith('/')) {
+    void (async () => {
+      try {
+        const response = await handleCommand(body, client, db, config, controlRoomId, logger)
+        const { body: plain, formatted_body } = formatMarkdown(response)
+        await client.sendMessage(controlRoomId, {
+          msgtype: 'm.text',
+          body: plain,
+          format: 'org.matrix.custom.html',
+          formatted_body,
+        })
+      } catch (err) {
+        logger.error({ err }, 'Command handler error')
+        await client.sendText(controlRoomId, `Error: ${err instanceof Error ? err.message : err}`)
+      }
+    })()
+    return
+  }
+  logger.info({ body: body.slice(0, 100) }, 'Control room message (no routing yet)')
+}
+
+// --- Session room message handler ---
+
+function handleSessionRoomMessage(
+  body: string,
+  sender: string,
+  session: Session,
+  roomId: string,
+  client: MatrixClient,
+  db: Database.Database,
+  logger: Logger,
+): void {
+  if (tryTextPermissionVerdict(body, session, db, client, roomId, logger)) return
+
+  if (session.status === 'detached') {
+    void client.sendText(roomId, `Session detached. Use \`/attach ${session.name}\` in control room.`)
+    return
+  }
+  if (session.status === 'archived') {
+    void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
+    return
+  }
+  const port = session.port
+  if (!port) {
+    void client.sendText(roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`)
+    return
+  }
+
+  void (async () => {
+    try {
+      await client.setTyping(roomId, true, 30000)
+      await sendMessage(port, sender, body)
+    } catch (err) {
+      logger.error({ err, session: session.name }, 'Failed to relay message')
+      await client.setTyping(roomId, false)
+      await client.sendText(roomId, `Failed to send message to Claude: ${err instanceof Error ? err.message : err}`)
+    }
+  })()
 }
 
 // --- Event Handlers ---
@@ -164,65 +339,18 @@ export function setupEventHandlers(
     const body = content.body as string
     if (!body) return
 
-    // Control room
     if (roomId === controlRoomId) {
-      if (body.startsWith('/')) {
-        void (async () => {
-          try {
-            const response = await handleCommand(body, client, db, config, controlRoomId, logger)
-            const { body: plain, formatted_body } = formatMarkdown(response)
-            await client.sendMessage(controlRoomId, {
-              msgtype: 'm.text',
-              body: plain,
-              format: 'org.matrix.custom.html',
-              formatted_body,
-            })
-          } catch (err) {
-            logger.error({ err }, 'Command handler error')
-            await client.sendText(controlRoomId, `Error: ${err instanceof Error ? err.message : err}`)
-          }
-        })()
-        return
-      }
-
-      // Non-command message in control room — log only (control Claude session comes later)
-      logger.info({ body: body.slice(0, 100) }, 'Control room message (no routing yet)')
+      handleControlRoomMessage(body, client, db, config, controlRoomId, logger)
       return
     }
 
-    // Session room
     const session = getSessionByRoomId(db, roomId)
     if (!session) return
 
-    if (session.status === 'detached') {
-      void client.sendText(roomId, `Session detached. Use \`/attach ${session.name}\` in control room.`)
-      return
-    }
-    if (session.status === 'archived') {
-      void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
-      return
-    }
-    const port = session.port
-    if (!port) {
-      void client.sendText(roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`)
-      return
-    }
-
-    // Route to relay
-    void (async () => {
-      try {
-        await client.setTyping(roomId, true, 30000)
-        await sendMessage(port, sender, body)
-        // Reply comes via SSE → handleSSEEvent
-      } catch (err) {
-        logger.error({ err, session: session.name }, 'Failed to relay message')
-        await client.setTyping(roomId, false)
-        await client.sendText(roomId, `Failed to send message to Claude: ${err instanceof Error ? err.message : err}`)
-      }
-    })()
+    handleSessionRoomMessage(body, sender, session, roomId, client, db, logger)
   })
 
-  // Reaction handler — permission handling comes in PR 2c
+  // Reaction handler for permission verdicts
   client.on('room.event', (roomId: string, event: Record<string, unknown>) => {
     if (event.type !== 'm.reaction') return
     const sender = event.sender as string
@@ -232,10 +360,32 @@ export function setupEventHandlers(
     const relatesTo = content['m.relates_to'] as Record<string, unknown> | undefined
     if (!relatesTo) return
 
-    logger.info(
-      { roomId, emoji: relatesTo.key, targetEventId: relatesTo.event_id },
-      'Reaction received (permission handling not yet implemented)',
-    )
+    const emoji = relatesTo.key as string
+    const targetEventId = relatesTo.event_id as string
+    if (!targetEventId) return
+
+    const permReq = getPermissionRequestByEventId(db, targetEventId)
+    if (!permReq) return
+
+    // Strip variation selectors (U+FE0F) — Matrix clients append them inconsistently
+    const stripped = emoji.replaceAll('\uFE0F', '')
+    const isAllow = stripped === '✅' || stripped === '👍'
+    const isDeny = stripped === '❌' || stripped === '👎'
+    if (!isAllow && !isDeny) return
+
+    const behavior: 'allow' | 'deny' = isAllow ? 'allow' : 'deny'
+    const session = getSessionByRoomId(db, roomId)
+
+    const sessionPort = session?.port
+    if (!sessionPort) return
+
+    void (async () => {
+      try {
+        await sendPermissionVerdict(permReq, behavior, sessionPort, roomId, client, db, logger)
+      } catch (err) {
+        logger.error({ err, requestId: permReq.request_id }, 'Failed to send permission verdict')
+      }
+    })()
   })
 
   logger.info('Event handlers registered')

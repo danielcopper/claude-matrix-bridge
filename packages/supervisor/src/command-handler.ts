@@ -15,6 +15,7 @@ import {
   createSession,
   updateSession,
   getConfig,
+  expireSessionPermissions,
 } from "./database.js";
 import { spawnClaude, killClaude } from "./process-manager.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
@@ -118,6 +119,7 @@ async function handleKill(
 
   await killClaude(session, logger);
   updateSession(db, session.id, { status: "archived", pid: null, port: null });
+  expireSessionPermissions(db, session.id);
 
   return `Session **${name}** archived.`;
 }
@@ -141,6 +143,7 @@ async function handleDetach(
 
   await killClaude(session, logger);
   updateSession(db, session.id, { status: "detached", pid: null });
+  expireSessionPermissions(db, session.id);
 
   return [
     `Session **${name}** detached.`,

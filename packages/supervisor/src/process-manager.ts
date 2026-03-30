@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { Logger } from 'pino'
 import type Database from 'better-sqlite3'
 import type { Session } from './types.js'
-import { updateSession } from './database.js'
+import { updateSession, expireSessionPermissions } from './database.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -84,14 +84,16 @@ export function spawnClaude(
   const claudeArgs = [
     '--dangerously-load-development-channels', 'server:matrix-relay',
     '--model', session.model,
-    '--session-id', session.id,
-    '--name', session.name,
     // Auto-allow relay tools so Claude doesn't prompt in tmux
     '--allowedTools', 'mcp__matrix-relay__reply mcp__matrix-relay__react',
   ]
 
   if (options?.resume) {
+    // Resume existing session — don't pass --session-id (conflicts with --resume)
     claudeArgs.push('--resume', session.id)
+  } else {
+    // New session
+    claudeArgs.push('--session-id', session.id, '--name', session.name)
   }
 
   if (session.permission_mode === 'bypassPermissions') {
@@ -116,10 +118,6 @@ export function spawnClaude(
     ], {
       encoding: 'utf-8',
       timeout: 10000,
-      env: {
-        ...process.env,
-        RELAY_PORT: String(session.port),
-      },
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -139,11 +137,13 @@ export function spawnClaude(
         const pane = execFileSync('tmux', ['capture-pane', '-t', tmuxName, '-p'], {
           encoding: 'utf-8',
           timeout: 3000,
+          stdio: ['pipe', 'pipe', 'pipe'],
         })
         if (pane.includes('I am using this for local development')) {
           execFileSync('tmux', ['send-keys', '-t', tmuxName, 'Enter'], {
             encoding: 'utf-8',
             timeout: 3000,
+            stdio: ['pipe', 'pipe', 'pipe'],
           })
           sessionLogger.info('Auto-confirmed development channels prompt')
           return
@@ -163,7 +163,7 @@ export function spawnClaude(
   try {
     const paneInfo = execFileSync('tmux', [
       'list-panes', '-t', tmuxName, '-F', '#{pane_pid}',
-    ], { encoding: 'utf-8', timeout: 5000 }).trim()
+    ], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim()
 
     const pid = Number(paneInfo)
     if (pid) {
@@ -180,11 +180,13 @@ export function spawnClaude(
       execFileSync('tmux', ['has-session', '-t', tmuxName], {
         encoding: 'utf-8',
         timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
       })
     } catch {
       clearInterval(pollInterval)
       activeSessions.delete(session.id)
       updateSession(db, session.id, { pid: null })
+      expireSessionPermissions(db, session.id)
       sessionLogger.warn('Claude tmux session ended')
       options?.onExit?.(null)
     }
@@ -213,6 +215,7 @@ export async function killClaude(
     execFileSync('tmux', ['send-keys', '-t', tmuxName, 'C-c', ''], {
       encoding: 'utf-8',
       timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     sessionLogger.info('Sent Ctrl+C to Claude')
   } catch {
@@ -225,6 +228,7 @@ export async function killClaude(
     execFileSync('tmux', ['kill-session', '-t', tmuxName], {
       encoding: 'utf-8',
       timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     sessionLogger.info('Killed tmux session')
   } catch {
@@ -246,6 +250,7 @@ export async function killAllProcesses(logger: Logger): Promise<void> {
     const sessions = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
       encoding: 'utf-8',
       timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     }).trim().split('\n')
 
     for (const name of sessions) {
@@ -254,6 +259,7 @@ export async function killAllProcesses(logger: Logger): Promise<void> {
           execFileSync('tmux', ['kill-session', '-t', name], {
             encoding: 'utf-8',
             timeout: 5000,
+            stdio: ['pipe', 'pipe', 'pipe'],
           })
           logger.info({ tmux: name }, 'Killed tmux session')
         } catch {
