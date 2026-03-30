@@ -1,0 +1,6 @@
+{
+  "name": "matrix-relay",
+  "description": "HTTP relay channel for Claude Code — bridges external systems via localhost HTTP",
+  "version": "0.0.1",
+  "keywords": ["matrix", "relay", "channel", "mcp", "http"]
+}

@@ -1,0 +1,18 @@
+[tools]
+bun = "latest"
+
+[tasks.install]
+description = "Install dependencies"
+run = "bun install"
+
+[tasks.dev]
+description = "Start relay server for local development"
+run = "RELAY_PORT=9999 bun server.ts"
+
+[tasks.health]
+description = "Check health of running dev server"
+run = "curl -s http://127.0.0.1:9999/health | jq ."
+
+[tasks.clean]
+description = "Remove node_modules"
+run = "rm -rf node_modules"
