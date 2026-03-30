@@ -194,16 +194,25 @@ export function setupEventHandlers(
     const session = getSessionByRoomId(db, roomId)
     if (!session) return
 
-    if (session.status !== 'active' || !session.pid || !session.port) {
-      logger.info({ session: session.name, status: session.status }, 'Session not active, ignoring message')
+    if (session.status === 'detached') {
+      void client.sendText(roomId, `Session detached. Use \`/attach ${session.name}\` in control room.`)
+      return
+    }
+    if (session.status === 'archived') {
+      void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
+      return
+    }
+    const port = session.port
+    if (!port) {
+      void client.sendText(roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`)
       return
     }
 
     // Route to relay
     void (async () => {
       try {
-        await client.setTyping(roomId, true, 30_000)
-        await sendMessage(session.port!, sender, body)
+        await client.setTyping(roomId, true, 30000)
+        await sendMessage(port, sender, body)
         // Reply comes via SSE → handleSSEEvent
       } catch (err) {
         logger.error({ err, session: session.name }, 'Failed to relay message')
