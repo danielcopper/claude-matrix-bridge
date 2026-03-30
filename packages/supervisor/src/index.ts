@@ -1,8 +1,9 @@
 import pino from 'pino'
 import { loadConfig } from './config.js'
-import { openDatabase, runMigrations } from './database.js'
-import { createBot, bootstrapSpaceAndRooms, setupEventHandlers } from './bot.js'
-import { ensureRelayRegistered, killAllProcesses } from './process-manager.js'
+import { openDatabase, runMigrations, getActiveSessions, updateSession } from './database.js'
+import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
+import { ensureRelayRegistered, spawnClaude, killAllProcesses } from './process-manager.js'
+import { waitForHealth, connectSSE } from './relay-client.js'
 
 const config = loadConfig()
 
@@ -15,6 +16,12 @@ logger.info('Starting supervisor')
 
 const db = openDatabase(config.database.path)
 runMigrations(db)
+
+// Expire all pending permission requests from previous run —
+// Claude sessions will be restarted fresh, old permission dialogs are gone
+db.prepare('UPDATE permission_requests SET status = ?, resolved_at = ? WHERE status = ?')
+  .run('expired', new Date().toISOString(), 'pending')
+
 logger.info({ path: config.database.path }, 'Database ready')
 
 // Ensure relay plugin is registered as user-scoped MCP server
@@ -27,9 +34,54 @@ logger.info('Matrix client connected')
 const { controlRoomId } = await bootstrapSpaceAndRooms(client, db, config, logger)
 setupEventHandlers(client, db, config, controlRoomId, logger)
 
+// --- Restart handling: restore active sessions from previous run ---
+
+const activeSessions = getActiveSessions(db)
+if (activeSessions.length > 0) {
+  logger.info({ count: activeSessions.length }, 'Restoring active sessions')
+  for (const session of activeSessions) {
+    if (!session.port) continue
+    try {
+      spawnClaude(session, config, db, logger, {
+        resume: true,
+        onExit: () => {
+          if (session.room_id) {
+            void client.sendHtmlText(
+              session.room_id,
+              '<strong>Claude session ended.</strong>',
+            ).catch(() => {})
+          }
+        },
+      })
+
+      const healthy = await waitForHealth(session.port, logger, 30000)
+      if (healthy) {
+        connectSSE(
+          session.port,
+          (event) => handleSSEEvent(event, session, client, db, logger),
+          (err) => logger.error({ err, session: session.name }, 'SSE connection error'),
+          logger,
+        )
+        logger.info({ session: session.name, port: session.port }, 'Session restored')
+        if (session.room_id) {
+          await client.sendText(session.room_id, 'Session restored after supervisor restart.')
+        }
+      } else {
+        logger.warn({ session: session.name, port: session.port }, 'Failed to restore session')
+        updateSession(db, session.id, { pid: null })
+      }
+    } catch (err) {
+      logger.error({ err, session: session.name }, 'Error restoring session')
+      updateSession(db, session.id, { pid: null })
+    }
+  }
+}
+
 await client.sendHtmlText(
   controlRoomId,
-  '<strong>Supervisor started.</strong> Use /claude-help for commands.',
+  activeSessions.length > 0
+    ? `<strong>Supervisor started.</strong> Restored ${activeSessions.length} session(s). Use /claude-help for commands.`
+    : '<strong>Supervisor started.</strong> Use /claude-help for commands.',
 )
 logger.info('Supervisor ready')
 

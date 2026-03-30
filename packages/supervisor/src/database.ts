@@ -1,8 +1,7 @@
 import Database from 'better-sqlite3'
-import { readFileSync } from 'fs'
-import { mkdirSync } from 'fs'
-import { dirname, resolve } from 'path'
-import { fileURLToPath } from 'url'
+import { readFileSync, mkdirSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Session, PermissionRequest, PermissionStatus } from './types.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -56,8 +55,16 @@ export function getSessionByName(
     | undefined
 }
 
+export function getSessionById(db: Database.Database, id: string): Session | undefined {
+  return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Session | undefined
+}
+
 export function getAllSessions(db: Database.Database): Session[] {
   return db.prepare('SELECT * FROM sessions ORDER BY created_at DESC').all() as Session[]
+}
+
+export function getActiveSessions(db: Database.Database): Session[] {
+  return db.prepare('SELECT * FROM sessions WHERE status = ? AND pid IS NOT NULL').all('active') as Session[]
 }
 
 export function createSession(db: Database.Database, session: Session): void {
@@ -101,6 +108,15 @@ export function getPermissionRequestByEventId(
   return db
     .prepare('SELECT * FROM permission_requests WHERE event_id = ? AND status = ?')
     .get(eventId, 'pending') as PermissionRequest | undefined
+}
+
+export function expireSessionPermissions(
+  db: Database.Database,
+  sessionId: string,
+): void {
+  db.prepare(
+    'UPDATE permission_requests SET status = ?, resolved_at = ? WHERE session_id = ? AND status = ?',
+  ).run('expired', new Date().toISOString(), sessionId, 'pending')
 }
 
 export function resolvePermissionRequest(

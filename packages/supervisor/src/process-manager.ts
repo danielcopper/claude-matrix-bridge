@@ -1,11 +1,10 @@
-import { execFileSync, execFile } from 'child_process'
-import { resolve, dirname } from 'path'
-import { fileURLToPath } from 'url'
+import { execFileSync } from 'node:child_process'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Logger } from 'pino'
 import type Database from 'better-sqlite3'
 import type { Session } from './types.js'
-import type { Config } from './config.js'
-import { updateSession } from './database.js'
+import { updateSession, expireSessionPermissions } from './database.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -20,6 +19,10 @@ function tmuxSessionName(session: Session): string {
   return `claude-${session.name}`
 }
 
+function quoteArg(a: string): string {
+  return `'${a}'`
+}
+
 export async function ensureRelayRegistered(logger: Logger): Promise<void> {
   const pluginPath = relayPluginPath()
 
@@ -27,7 +30,7 @@ export async function ensureRelayRegistered(logger: Logger): Promise<void> {
   try {
     const output = execFileSync('claude', ['mcp', 'list'], {
       encoding: 'utf-8',
-      timeout: 10_000,
+      timeout: 10000,
     })
     if (output.includes('matrix-relay')) {
       logger.debug('matrix-relay MCP server already registered')
@@ -43,7 +46,7 @@ export async function ensureRelayRegistered(logger: Logger): Promise<void> {
     bunPath = execFileSync('mise', ['which', 'bun'], {
       encoding: 'utf-8',
       cwd: pluginPath,
-      timeout: 10_000,
+      timeout: 10000,
     }).trim()
   } catch {
     // Fallback: check global PATH
@@ -62,17 +65,17 @@ export async function ensureRelayRegistered(logger: Logger): Promise<void> {
   logger.info('Registering matrix-relay MCP server (user scope)')
   execFileSync('claude', ['mcp', 'add-json', '--scope', 'user', 'matrix-relay', serverConfig], {
     encoding: 'utf-8',
-    timeout: 10_000,
+    timeout: 10000,
   })
   logger.info('matrix-relay MCP server registered')
 }
 
 export function spawnClaude(
   session: Session,
-  config: Config,
+  _config: unknown,
   db: Database.Database,
   logger: Logger,
-  onExit?: (code: number | null) => void,
+  options?: { resume?: boolean; onExit?: (code: number | null) => void },
 ): void {
   const tmuxName = tmuxSessionName(session)
   const sessionLogger = logger.child({ session: session.name, port: session.port, tmux: tmuxName })
@@ -81,11 +84,17 @@ export function spawnClaude(
   const claudeArgs = [
     '--dangerously-load-development-channels', 'server:matrix-relay',
     '--model', session.model,
-    '--session-id', session.id,
-    '--name', session.name,
     // Auto-allow relay tools so Claude doesn't prompt in tmux
     '--allowedTools', 'mcp__matrix-relay__reply mcp__matrix-relay__react',
   ]
+
+  if (options?.resume) {
+    // Resume existing session — don't pass --session-id (conflicts with --resume)
+    claudeArgs.push('--resume', session.id)
+  } else {
+    // New session
+    claudeArgs.push('--session-id', session.id, '--name', session.name)
+  }
 
   if (session.permission_mode === 'bypassPermissions') {
     claudeArgs.push('--dangerously-skip-permissions')
@@ -93,7 +102,8 @@ export function spawnClaude(
 
   // Construct the full command string for tmux
   // RELAY_PORT is set as env var prefix so the channel plugin picks it up
-  const claudeCmd = `RELAY_PORT=${session.port} claude ${claudeArgs.map(a => `'${a}'`).join(' ')}`
+  const quotedArgs = claudeArgs.map(quoteArg).join(' ')
+  const claudeCmd = `RELAY_PORT=${session.port} claude ${quotedArgs}`
 
   sessionLogger.info({ cwd: session.working_directory, claudeCmd }, 'Spawning Claude in tmux')
 
@@ -107,11 +117,7 @@ export function spawnClaude(
       claudeCmd,               // command to run
     ], {
       encoding: 'utf-8',
-      timeout: 10_000,
-      env: {
-        ...process.env,
-        RELAY_PORT: String(session.port),
-      },
+      timeout: 10000,
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -131,11 +137,13 @@ export function spawnClaude(
         const pane = execFileSync('tmux', ['capture-pane', '-t', tmuxName, '-p'], {
           encoding: 'utf-8',
           timeout: 3000,
+          stdio: ['pipe', 'pipe', 'pipe'],
         })
         if (pane.includes('I am using this for local development')) {
           execFileSync('tmux', ['send-keys', '-t', tmuxName, 'Enter'], {
             encoding: 'utf-8',
             timeout: 3000,
+            stdio: ['pipe', 'pipe', 'pipe'],
           })
           sessionLogger.info('Auto-confirmed development channels prompt')
           return
@@ -155,7 +163,7 @@ export function spawnClaude(
   try {
     const paneInfo = execFileSync('tmux', [
       'list-panes', '-t', tmuxName, '-F', '#{pane_pid}',
-    ], { encoding: 'utf-8', timeout: 5000 }).trim()
+    ], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim()
 
     const pid = Number(paneInfo)
     if (pid) {
@@ -172,19 +180,18 @@ export function spawnClaude(
       execFileSync('tmux', ['has-session', '-t', tmuxName], {
         encoding: 'utf-8',
         timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
       })
-      // Session still alive
     } catch {
-      // tmux session gone — Claude exited
       clearInterval(pollInterval)
       activeSessions.delete(session.id)
       updateSession(db, session.id, { pid: null })
+      expireSessionPermissions(db, session.id)
       sessionLogger.warn('Claude tmux session ended')
-      onExit?.(null)
+      options?.onExit?.(null)
     }
   }, 5000)
 
-  // Store the interval so we can clean it up
   exitPollers.set(session.id, pollInterval)
 }
 
@@ -197,7 +204,6 @@ export async function killClaude(
   const tmuxName = tmuxSessionName(session)
   const sessionLogger = logger.child({ session: session.name, tmux: tmuxName })
 
-  // Stop the exit poller
   const poller = exitPollers.get(session.id)
   if (poller) {
     clearInterval(poller)
@@ -209,19 +215,20 @@ export async function killClaude(
     execFileSync('tmux', ['send-keys', '-t', tmuxName, 'C-c', ''], {
       encoding: 'utf-8',
       timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     sessionLogger.info('Sent Ctrl+C to Claude')
   } catch {
     // Session might already be gone
   }
 
-  // Wait a bit, then kill the tmux session
   await new Promise(r => setTimeout(r, 3000))
 
   try {
     execFileSync('tmux', ['kill-session', '-t', tmuxName], {
       encoding: 'utf-8',
       timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     sessionLogger.info('Killed tmux session')
   } catch {
@@ -239,29 +246,29 @@ export async function killAllProcesses(logger: Logger): Promise<void> {
   }
 
   // Kill all tmux sessions with claude- prefix
-  for (const sessionId of activeSessions) {
-    try {
-      // Find tmux sessions — we don't have the Session object, so search by prefix
-      const sessions = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
-        encoding: 'utf-8',
-        timeout: 5000,
-      }).trim().split('\n')
+  try {
+    const sessions = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim().split('\n')
 
-      for (const name of sessions) {
-        if (name.startsWith('claude-')) {
-          try {
-            execFileSync('tmux', ['kill-session', '-t', name], {
-              encoding: 'utf-8',
-              timeout: 5000,
-            })
-            logger.info({ tmux: name }, 'Killed tmux session')
-          } catch {}
+    for (const name of sessions) {
+      if (name.startsWith('claude-')) {
+        try {
+          execFileSync('tmux', ['kill-session', '-t', name], {
+            encoding: 'utf-8',
+            timeout: 5000,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          })
+          logger.info({ tmux: name }, 'Killed tmux session')
+        } catch {
+          // Already gone
         }
       }
-    } catch {
-      // tmux not running or no sessions
     }
-    break // Only need to list once
+  } catch {
+    // tmux not running or no sessions
   }
 
   activeSessions.clear()
