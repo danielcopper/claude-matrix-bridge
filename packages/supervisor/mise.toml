@@ -1,0 +1,26 @@
+[tools]
+node = "22"
+
+[tasks.install]
+description = "Install dependencies"
+run = "npm install"
+
+[tasks.dev]
+description = "Start supervisor in dev mode"
+run = "npx tsx src/index.ts"
+
+[tasks.build]
+description = "Compile TypeScript"
+run = "npx tsc"
+
+[tasks.start]
+description = "Run compiled supervisor"
+run = "node dist/index.js"
+
+[tasks.typecheck]
+description = "Type-check without emitting"
+run = "npx tsc --noEmit"
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf dist node_modules"
