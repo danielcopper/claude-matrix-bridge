@@ -190,13 +190,22 @@ async function handleMessage(req: Request): Promise<Response> {
 }
 
 function handleEvents(): Response {
+  let keepalive: ReturnType<typeof setInterval> | undefined
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       sseClients.add(controller)
       controller.enqueue(encoder.encode(': connected\n\n'))
+      keepalive = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(': ping\n\n'))
+        } catch {
+          sseClients.delete(controller)
+          if (keepalive) clearInterval(keepalive)
+        }
+      }, 15_000)
     },
-    cancel(controller) {
-      sseClients.delete(controller as ReadableStreamDefaultController<Uint8Array>)
+    cancel() {
+      if (keepalive) clearInterval(keepalive)
     },
   })
 
@@ -248,6 +257,7 @@ async function handlePermission(req: Request): Promise<Response> {
 Bun.serve({
   port: RELAY_PORT,
   hostname: '127.0.0.1',
+  idleTimeout: 0, // SSE connections must stay open indefinitely
   async fetch(req) {
     const url = new URL(req.url)
 
