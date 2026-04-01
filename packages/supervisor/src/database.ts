@@ -67,6 +67,22 @@ export function getActiveSessions(db: Database.Database): Session[] {
   return db.prepare('SELECT * FROM sessions WHERE status = ? AND pid IS NOT NULL').all('active') as Session[]
 }
 
+export function nextFreePort(
+  db: Database.Database,
+  portStart: number,
+  portEnd: number,
+): number | null {
+  const usedPorts = new Set(
+    getAllSessions(db)
+      .filter((s): s is Session & { port: number } => s.status === 'active' && s.port != null)
+      .map((s) => s.port),
+  )
+  for (let port = portStart; port <= portEnd; port++) {
+    if (!usedPorts.has(port)) return port
+  }
+  return null
+}
+
 export function createSession(db: Database.Database, session: Session): void {
   db.prepare(
     `INSERT INTO sessions (id, room_id, name, working_directory, model, permission_mode, port, pid, status, created_at, updated_at, last_message_at)

@@ -1,6 +1,6 @@
 import pino from 'pino'
 import { loadConfig } from './config.js'
-import { openDatabase, runMigrations, getActiveSessions, updateSession } from './database.js'
+import { openDatabase, runMigrations, getActiveSessions, updateSession, nextFreePort } from './database.js'
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
 import { ensureRelayRegistered, spawnClaude, killAllProcesses } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
@@ -40,9 +40,17 @@ const activeSessions = getActiveSessions(db)
 if (activeSessions.length > 0) {
   logger.info({ count: activeSessions.length }, 'Restoring active sessions')
   for (const session of activeSessions) {
-    if (!session.port) continue
+    // Allocate a fresh port to avoid conflicts from stale DB state
+    const port = nextFreePort(db, config.ports.start, config.ports.end)
+    if (!port) {
+      logger.warn({ session: session.name }, 'No free port for session restore')
+      updateSession(db, session.id, { pid: null })
+      continue
+    }
+    const restored = { ...session, port }
+    updateSession(db, session.id, { port })
     try {
-      spawnClaude(session, config, db, logger, {
+      spawnClaude(restored, config, db, logger, {
         resume: true,
         onExit: () => {
           if (session.room_id) {
@@ -54,15 +62,15 @@ if (activeSessions.length > 0) {
         },
       })
 
-      const healthy = await waitForHealth(session.port, logger, 30000)
+      const healthy = await waitForHealth(port, logger, 30000)
       if (healthy) {
         connectSSE(
-          session.port,
-          (event) => handleSSEEvent(event, session, client, db, logger),
-          (err) => logger.error({ err, session: session.name }, 'SSE connection error'),
+          port,
+          (event) => handleSSEEvent(event, restored, client, db, logger),
+          (err) => logger.error({ err, session: restored.name }, 'SSE connection error'),
           logger,
         )
-        logger.info({ session: session.name, port: session.port }, 'Session restored')
+        logger.info({ session: restored.name, port }, 'Session restored')
         if (session.room_id) {
           await client.sendText(session.room_id, 'Session restored after supervisor restart.')
         }

@@ -107,6 +107,18 @@ export function spawnClaude(
 
   sessionLogger.info({ cwd: session.working_directory, claudeCmd }, 'Spawning Claude in tmux')
 
+  // Kill stale tmux session with same name if it exists
+  try {
+    execFileSync('tmux', ['kill-session', '-t', tmuxName], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    sessionLogger.info('Killed stale tmux session')
+  } catch {
+    // No existing session — expected
+  }
+
   // Create a detached tmux session running claude
   try {
     execFileSync('tmux', [
