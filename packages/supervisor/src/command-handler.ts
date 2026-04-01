@@ -16,6 +16,7 @@ import {
   updateSession,
   getConfig,
   expireSessionPermissions,
+  nextFreePort,
 } from "./database.js";
 import { spawnClaude, killClaude } from "./process-manager.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
@@ -173,7 +174,7 @@ async function handleAttach(
   // Allocate port if needed (archived sessions have port = null)
   let port = session.port;
   if (!port) {
-    port = nextFreePort(db, config);
+    port = nextFreePort(db, config.ports.start, config.ports.end);
     if (!port) return `No free ports available.`;
   }
 
@@ -280,17 +281,6 @@ function autoName(workDir: string, db: Database.Database): string {
   return `${name}-${Date.now()}`;
 }
 
-function nextFreePort(db: Database.Database, config: Config): number | null {
-  const usedPorts = new Set(
-    getAllSessions(db)
-      .filter((s): s is Session & { port: number } => s.status === "active" && s.port != null)
-      .map((s) => s.port),
-  );
-  for (let port = config.ports.start; port <= config.ports.end; port++) {
-    if (!usedPorts.has(port)) return port;
-  }
-  return null;
-}
 
 // --- /new ---
 
@@ -365,7 +355,7 @@ async function handleNew(
   if (typeof parsed === "string") return parsed;
   const { workDir, name } = parsed;
 
-  const port = nextFreePort(db, config);
+  const port = nextFreePort(db, config.ports.start, config.ports.end);
   if (port == null) {
     return `No free ports available (${config.ports.start}-${config.ports.end}). Kill some sessions first.`;
   }

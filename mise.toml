@@ -1,0 +1,60 @@
+[tools]
+node = "22"
+bun = "latest"
+
+[tasks.install]
+description = "Install all dependencies"
+run = """
+cd packages/matrix-relay && bun install
+cd ../../packages/supervisor && npm install
+"""
+
+[tasks.build]
+description = "Build supervisor for production"
+depends = ["install"]
+run = "cd packages/supervisor && npx tsc"
+
+[tasks.dev]
+description = "Start supervisor in dev mode"
+run = "cd packages/supervisor && npx tsx src/index.ts"
+
+[tasks.typecheck]
+description = "Type-check all packages"
+run = "cd packages/supervisor && npx tsc --noEmit"
+
+[tasks.clean]
+description = "Remove build artifacts and node_modules"
+run = """
+rm -rf packages/supervisor/dist packages/supervisor/node_modules
+rm -rf packages/matrix-relay/node_modules
+"""
+
+[tasks.start]
+description = "Run production build"
+depends = ["build"]
+run = "cd packages/supervisor && node dist/index.js"
+
+[tasks.register-relay]
+description = "Register matrix-relay as user-scoped MCP server"
+run = "scripts/register-relay.sh"
+
+[tasks.setup]
+description = "Full setup: install deps, build, register relay, prepare .env"
+depends = ["build"]
+run = """
+mise run register-relay
+mkdir -p packages/supervisor/data
+if [ ! -f .env ]; then
+  cp .env.example .env
+  echo "[WARN] .env created from .env.example — edit it with your Matrix credentials"
+else
+  echo "[INFO] .env already exists"
+fi
+echo ""
+echo "Setup complete! Edit .env, then run: mise run start"
+"""
+
+[tasks.deploy]
+description = "Build and restart systemd service"
+depends = ["build"]
+run = "sudo systemctl restart claude-matrix-bridge"

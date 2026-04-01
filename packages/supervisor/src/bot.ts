@@ -21,8 +21,15 @@ import { sendPermission, sendMessage } from './relay-client.js'
 import { handleCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 
+const SDK_LOG_LEVELS: Record<string, LogLevel> = {
+  debug: LogLevel.DEBUG,
+  info: LogLevel.INFO,
+  warn: LogLevel.WARN,
+  error: LogLevel.ERROR,
+}
+
 export function createBot(config: Config, logger: Logger): MatrixClient {
-  LogService.setLevel(LogLevel.WARN)
+  LogService.setLevel(SDK_LOG_LEVELS[config.logLevel] ?? LogLevel.WARN)
 
   const storage = new SimpleFsStorageProvider('data/bot-sync.json')
   const client = new MatrixClient(
@@ -48,17 +55,23 @@ export async function bootstrapSpaceAndRooms(
   if (spaceId) {
     logger.info({ spaceId }, 'Using existing space')
   } else {
-    logger.info('Creating Claude Code space')
-    const space = await client.createSpace({
-      name: 'Claude Code',
-      topic: 'Claude Code remote sessions',
-      isPublic: false,
-      localpart: 'claude-code',
-      invites: [config.matrix.ownerUserId],
-    })
-    spaceId = space.roomId
+    // Try to resolve existing space by alias, or create new
+    try {
+      spaceId = await client.resolveRoom(`#claude-code:${domain}`)
+      logger.info({ spaceId }, 'Found existing space by alias')
+    } catch {
+      logger.info('Creating Claude Code space')
+      const space = await client.createSpace({
+        name: 'Claude Code',
+        topic: 'Claude Code remote sessions',
+        isPublic: false,
+        localpart: 'claude-code',
+        invites: [config.matrix.ownerUserId],
+      })
+      spaceId = space.roomId
+      logger.info({ spaceId }, 'Space created')
+    }
     setConfig(db, 'space_id', spaceId)
-    logger.info({ spaceId }, 'Space created')
   }
 
   // --- Control Room ---
@@ -66,27 +79,36 @@ export async function bootstrapSpaceAndRooms(
   if (controlRoomId) {
     logger.info({ controlRoomId }, 'Using existing control room')
   } else {
-    logger.info('Creating control room')
-    controlRoomId = await client.createRoom({
-      name: 'claude-control',
-      topic: 'Claude Code control room — use /claude-help for commands',
-      preset: 'private_chat',
-      room_alias_name: 'claude-control',
-      invite: [config.matrix.ownerUserId],
-    })
-
-    // Add to space
-    await client.sendStateEvent(spaceId, 'm.space.child', controlRoomId, {
-      via: [domain],
-      suggested: true,
-    })
-    await client.sendStateEvent(controlRoomId, 'm.space.parent', spaceId, {
-      canonical: true,
-      via: [domain],
-    })
-
+    // Try to resolve existing room by alias, or create new
+    try {
+      controlRoomId = await client.resolveRoom(`#claude-control:${domain}`)
+      logger.info({ controlRoomId }, 'Found existing control room by alias')
+    } catch {
+      logger.info('Creating control room')
+      controlRoomId = await client.createRoom({
+        name: 'claude-control',
+        topic: 'Claude Code control room — use /claude-help for commands',
+        preset: 'private_chat',
+        room_alias_name: 'claude-control',
+        invite: [config.matrix.ownerUserId],
+      })
+    }
     setConfig(db, 'control_room_id', controlRoomId)
-    logger.info({ controlRoomId }, 'Control room created')
+    logger.info({ controlRoomId }, 'Control room ready')
+
+    // Ensure room is in space
+    try {
+      await client.sendStateEvent(spaceId, 'm.space.child', controlRoomId, {
+        via: [domain],
+        suggested: true,
+      })
+      await client.sendStateEvent(controlRoomId, 'm.space.parent', spaceId, {
+        canonical: true,
+        via: [domain],
+      })
+    } catch {
+      // Already linked or no permission — ignore
+    }
   }
 
   // Ensure owner is invited to both space and control room
