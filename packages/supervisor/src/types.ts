@@ -1,6 +1,6 @@
 // --- Session ---
 
-export type SessionStatus = 'active' | 'detached' | 'archived'
+export type SessionStatus = 'active' | 'handed_off' | 'detached' | 'archived'
 export type PermissionMode = 'default' | 'plan' | 'bypassPermissions'
 
 export interface Session {

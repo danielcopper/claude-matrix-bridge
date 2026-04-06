@@ -146,7 +146,13 @@ When Claude needs permission to use a tool (e.g. write a file, run a command), a
 
 ### Detach / Attach
 
-You can switch between Matrix and local terminal:
+You can switch between Matrix and local terminal.
+
+**Automatic (with hooks installed):**
+
+Just open a terminal and `claude --resume` — pick your session. The supervisor automatically detaches from Matrix, and when you close the local session, it re-attaches to Matrix. No manual steps.
+
+**Manual (without hooks):**
 
 ```bash
 # In Matrix: detach the session
@@ -157,6 +163,29 @@ claude --resume SESSION_UUID
 
 # When done, re-attach in Matrix
 /attach my-session
+```
+
+### Session Handoff Hooks
+
+The `install.sh` script can optionally install Claude Code hooks that enable automatic session handoff. The hooks notify the supervisor when you resume or end a session locally.
+
+If the supervisor is not running, the hooks fail silently — Claude works normally.
+
+To install hooks manually, add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "resume",
+      "hooks": [{"type": "command", "command": "/path/to/scripts/session-hook.sh start", "timeout": 5000}]
+    }],
+    "SessionEnd": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "/path/to/scripts/session-hook.sh end", "timeout": 5000}]
+    }]
+  }
+}
 ```
 
 ### Inspecting sessions

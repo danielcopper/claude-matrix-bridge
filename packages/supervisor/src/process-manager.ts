@@ -102,8 +102,10 @@ export function spawnClaude(
 
   // Construct the full command string for tmux
   // RELAY_PORT is set as env var prefix so the channel plugin picks it up
+  // CMB_MANAGED=1 tells the session-hook.sh to skip notifying the supervisor
+  // (prevents infinite loop: supervisor resumes → hook fires → supervisor hands off → ...)
   const quotedArgs = claudeArgs.map(quoteArg).join(' ')
-  const claudeCmd = `RELAY_PORT=${session.port} claude ${quotedArgs}`
+  const claudeCmd = `CMB_MANAGED=1 RELAY_PORT=${session.port} claude ${quotedArgs}`
 
   sessionLogger.info({ cwd: session.working_directory, claudeCmd }, 'Spawning Claude in tmux')
 

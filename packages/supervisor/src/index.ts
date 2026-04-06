@@ -4,6 +4,7 @@ import { openDatabase, runMigrations, getActiveSessions, updateSession, nextFree
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
 import { ensureRelayRegistered, spawnClaude, killAllProcesses } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
+import { startApiServer } from './api.js'
 
 const config = loadConfig()
 
@@ -91,6 +92,10 @@ await client.sendHtmlText(
     ? `<strong>Supervisor started.</strong> Restored ${activeSessions.length} session(s). Use /claude-help for commands.`
     : '<strong>Supervisor started.</strong> Use /claude-help for commands.',
 )
+// --- HTTP API for session handoff hooks ---
+
+const apiServer = startApiServer(config.apiPort, db, config, client, logger)
+
 logger.info('Supervisor ready')
 
 // --- Graceful shutdown ---
@@ -106,6 +111,7 @@ async function shutdown(signal: string): Promise<void> {
   } catch {
     // Best effort
   }
+  apiServer.close()
   client.stop()
   db.close()
   process.exit(0)

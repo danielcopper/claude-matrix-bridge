@@ -20,6 +20,7 @@ export interface Config {
   database: {
     path: string;
   };
+  apiPort: number;
   logLevel: string;
 }
 
@@ -56,6 +57,7 @@ export function loadConfig(): Config {
     database: {
       path: process.env.DATABASE_PATH ?? "./data/bot.db",
     },
+    apiPort: Number(process.env.SUPERVISOR_API_PORT ?? 9090),
     logLevel: process.env.LOG_LEVEL ?? "info",
   };
 }
