@@ -66,6 +66,52 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now claude-matrix-bridge
 info "systemd service installed and started"
 
+# --- Session handoff hooks (optional) ---
+
+echo ""
+read -rp "Install Claude hooks for automatic session handoff (Matrix ↔ terminal)? [y/N] " INSTALL_HOOKS
+
+if [[ "$INSTALL_HOOKS" =~ ^[Yy]$ ]]; then
+  HOOK_SCRIPT="$REPO_DIR/scripts/session-hook.sh"
+  SETTINGS_FILE="$HOME/.claude/settings.json"
+
+  mkdir -p "$(dirname "$SETTINGS_FILE")"
+
+  if [ -f "$SETTINGS_FILE" ]; then
+    # Merge hooks into existing settings
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c "
+import json, sys
+try:
+    with open('$SETTINGS_FILE') as f:
+        settings = json.load(f)
+except:
+    settings = {}
+hooks = settings.setdefault('hooks', {})
+hooks['SessionStart'] = [{'matcher': 'resume', 'hooks': [{'type': 'command', 'command': '$HOOK_SCRIPT start', 'timeout': 5000}]}]
+hooks['SessionEnd'] = [{'matcher': '', 'hooks': [{'type': 'command', 'command': '$HOOK_SCRIPT end', 'timeout': 5000}]}]
+with open('$SETTINGS_FILE', 'w') as f:
+    json.dump(settings, f, indent=2)
+"
+      info "Hooks added to $SETTINGS_FILE"
+    else
+      warn "python3 not found — add hooks manually to $SETTINGS_FILE"
+    fi
+  else
+    cat > "$SETTINGS_FILE" <<HOOKS
+{
+  "hooks": {
+    "SessionStart": [{"matcher": "resume", "hooks": [{"type": "command", "command": "$HOOK_SCRIPT start", "timeout": 5000}]}],
+    "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "$HOOK_SCRIPT end", "timeout": 5000}]}]
+  }
+}
+HOOKS
+    info "Created $SETTINGS_FILE with hooks"
+  fi
+else
+  info "Skipping hooks. You can add them later — see README."
+fi
+
 # --- Done ---
 
 echo ""
