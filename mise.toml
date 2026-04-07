@@ -51,7 +51,7 @@ else
   echo "[INFO] .env already exists"
 fi
 echo ""
-echo "Setup complete! Edit .env, then run: mise run start"
+echo "Setup complete!"
 """
 
 [tasks.deploy]
