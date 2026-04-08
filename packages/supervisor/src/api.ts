@@ -4,6 +4,7 @@ import type { MatrixClient } from 'matrix-bot-sdk'
 import type { Logger } from 'pino'
 import type { Config } from './config.js'
 import { getSessionById, updateSession } from './database.js'
+import { recentlySpawned } from './process-manager.js'
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -83,6 +84,13 @@ async function handleSessionStart(
   const session = getSessionById(db, sessionId)
   if (!session) {
     json(res, 404, { error: 'session not managed by supervisor' })
+    return
+  }
+
+  // Ignore hooks fired by our own spawns (replaces CMB_MANAGED env var)
+  if (recentlySpawned.delete(sessionId)) {
+    logger.debug({ session: session.name }, 'Ignoring SessionStart from supervisor spawn')
+    json(res, 200, { status: session.status, action: 'ignored' })
     return
   }
 

@@ -47,13 +47,15 @@ function parseLines(raw: string): unknown[] {
 
 function extractMetadata(lines: unknown[]): {
   sessionId: string | null
-  title: string | null
+  customTitle: string | null
+  slug: string | null
   cwd: string | null
   gitBranch: string | null
   timestamp: string | null
 } {
   let sessionId: string | null = null
-  let title: string | null = null
+  let customTitle: string | null = null
+  let slug: string | null = null
   let cwd: string | null = null
   let gitBranch: string | null = null
   let timestamp: string | null = null
@@ -63,14 +65,14 @@ function extractMetadata(lines: unknown[]): {
     const rec = obj as Record<string, unknown>
 
     if (!sessionId && typeof rec.sessionId === 'string') sessionId = rec.sessionId
-    if (!title && rec.type === 'custom-title' && typeof rec.customTitle === 'string') title = rec.customTitle
-    if (!title && typeof rec.slug === 'string') title = rec.slug
+    if (!customTitle && rec.type === 'custom-title' && typeof rec.customTitle === 'string') customTitle = rec.customTitle
+    if (!slug && typeof rec.slug === 'string') slug = rec.slug
     if (!cwd && typeof rec.cwd === 'string') cwd = rec.cwd
     if (!gitBranch && typeof rec.gitBranch === 'string') gitBranch = rec.gitBranch
     if (typeof rec.timestamp === 'string') timestamp = rec.timestamp
   }
 
-  return { sessionId, title, cwd, gitBranch, timestamp }
+  return { sessionId, customTitle, slug, cwd, gitBranch, timestamp }
 }
 
 export function scanSessions(): DiscoveredSession[] {
@@ -107,7 +109,8 @@ export function scanSessions(): DiscoveredSession[] {
       const tail = extractMetadata(tailLines)
 
       const sessionId = head.sessionId ?? fileId
-      const title = head.title ?? tail.title
+      const customTitle = head.customTitle ?? tail.customTitle
+      const slug = head.slug ?? tail.slug
       const cwd = head.cwd ?? tail.cwd
       const gitBranch = head.gitBranch ?? tail.gitBranch
       const lastActivity = tail.timestamp ?? head.timestamp
@@ -116,7 +119,8 @@ export function scanSessions(): DiscoveredSession[] {
 
       sessions.push({
         id: sessionId,
-        title,
+        customTitle,
+        slug,
         cwd: cwd ?? 'unknown',
         gitBranch,
         lastActivity,

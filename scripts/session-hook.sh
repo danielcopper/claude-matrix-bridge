@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
 # Claude Code hook for session handoff.
 # Notifies the claude-matrix-bridge supervisor when a session is
-# resumed locally or ended, enabling automatic Matrix ↔ terminal handoff.
+# resumed locally or ended, enabling automatic Matrix <-> terminal handoff.
 #
 # Fails silently if the supervisor is not running — Claude works normally.
+# Supervisor-spawned sessions are filtered server-side (no env var needed).
 #
 # Usage (configured in ~/.claude/settings.json):
 #   SessionStart (resume): session-hook.sh start
 #   SessionEnd:            session-hook.sh end
-
-# Skip if this session is managed by the supervisor (running inside tmux)
-# Prevents infinite loop: supervisor resumes → hook fires → supervisor hands off → ...
-if [ "$CMB_MANAGED" = "1" ]; then
-  exit 0
-fi
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)

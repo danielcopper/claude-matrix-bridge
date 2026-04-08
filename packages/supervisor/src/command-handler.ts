@@ -106,7 +106,7 @@ function handleDiscover(limitArg: string | undefined, db: Database.Database): st
 
   const rows = unknown.map((s, i) => {
     const dir = s.cwd.replace(homedir(), "~")
-    const name = s.title ?? s.id.slice(0, 8)
+    const name = s.customTitle ?? s.slug ?? s.id.slice(0, 8)
     return `| ${i + 1} | ${name} | ${dir} | ${s.gitBranch ?? "-"} | ${timeAgo(s.lastActivity)} |`
   })
 
@@ -363,9 +363,9 @@ function expandTilde(p: string): string {
 }
 
 function discoveredName(discovered: DiscoveredSession, db: Database.Database): string {
-  // Prefer user-set customTitle
-  if (discovered.title && discovered.title !== discovered.id) {
-    const cleaned = discovered.title
+  // Prefer user-set customTitle (not the auto-generated slug)
+  if (discovered.customTitle) {
+    const cleaned = discovered.customTitle
       .toLowerCase()
       .replaceAll(/[^a-z0-9-]/g, "-")
       .replaceAll(/-+/g, "-");
@@ -374,7 +374,7 @@ function discoveredName(discovered: DiscoveredSession, db: Database.Database): s
 
   // Fallback: dirname-branch-shortid
   const dirName = basename(discovered.cwd);
-  const shortId = discovered.id.slice(0, 4);
+  const shortId = discovered.id.slice(0, 5);
   const parts = [dirName, discovered.gitBranch, shortId].filter(Boolean);
   const name = parts
     .join("-")

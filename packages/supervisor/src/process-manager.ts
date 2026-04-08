@@ -11,6 +11,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // Track active tmux session names for cleanup
 export const activeSessions = new Set<string>()
 
+// Track session IDs spawned by the supervisor so the API can ignore
+// SessionStart hooks fired by our own spawns (replaces CMB_MANAGED env var).
+export const recentlySpawned = new Set<string>()
+
 export function relayPluginPath(): string {
   return resolve(__dirname, '..', '..', 'matrix-relay')
 }
@@ -102,10 +106,11 @@ export function spawnClaude(
 
   // Construct the full command string for tmux
   // RELAY_PORT is set as env var prefix so the channel plugin picks it up
-  // CMB_MANAGED=1 tells the session-hook.sh to skip notifying the supervisor
-  // (prevents infinite loop: supervisor resumes → hook fires → supervisor hands off → ...)
   const quotedArgs = claudeArgs.map(quoteArg).join(' ')
-  const claudeCmd = `CMB_MANAGED=1 RELAY_PORT=${session.port} claude ${quotedArgs}`
+  const claudeCmd = `RELAY_PORT=${session.port} claude ${quotedArgs}`
+
+  // Mark as supervisor-spawned so the API ignores the SessionStart hook
+  recentlySpawned.add(session.id)
 
   sessionLogger.info({ cwd: session.working_directory, claudeCmd }, 'Spawning Claude in tmux')
 
@@ -250,6 +255,7 @@ export async function killClaude(
   }
 
   activeSessions.delete(session.id)
+  recentlySpawned.delete(session.id)
 }
 
 export async function killAllProcesses(logger: Logger): Promise<void> {
@@ -286,4 +292,5 @@ export async function killAllProcesses(logger: Logger): Promise<void> {
   }
 
   activeSessions.clear()
+  recentlySpawned.clear()
 }
