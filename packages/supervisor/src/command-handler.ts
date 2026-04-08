@@ -7,9 +7,10 @@ import type { MatrixClient } from "matrix-bot-sdk";
 import type Database from "better-sqlite3";
 import type { Logger } from "pino";
 import type { Config } from "./config.js";
-import type { Session } from "./types.js";
+import type { Session, DiscoveredSession } from "./types.js";
 import {
   getSessionByName,
+  getSessionById,
   getAllSessions,
   getActiveSessions,
   createSession,
@@ -21,8 +22,12 @@ import {
 import { spawnClaude, killClaude } from "./process-manager.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
 import { handleSSEEvent } from "./bot.js";
+import { scanSessions } from "./session-scanner.js";
 
 const startTime = Date.now();
+
+// Temporary mapping from /discover results: number → DiscoveredSession
+let discoverCache: DiscoveredSession[] = [];
 
 export async function handleCommand(
   body: string,
@@ -52,6 +57,8 @@ export async function handleCommand(
       return handleDetach(parts[1], db, logger);
     case "/attach":
       return handleAttach(parts[1], client, db, config, logger);
+    case "/discover":
+      return handleDiscover(parts[1], db);
     case "/status":
       return handleStatus(db, config);
     case "/claude-help":
@@ -71,9 +78,45 @@ function handleHelp(): string {
     "`/kill <name>` — End session (archive)",
     "`/detach <name>` — Detach session (for local work with claude --resume)",
     "`/attach <name>` — Re-attach detached/archived session",
+    "`/attach #N` — Attach a discovered session by number",
+    "`/discover [N]` — Find local Claude sessions (default: 10 most recent)",
     "`/status` — Show bot status",
     "`/claude-help` — Show this help",
   ].join("\n");
+}
+
+// --- /discover ---
+
+function handleDiscover(limitArg: string | undefined, db: Database.Database): string {
+  const limit = Math.max(1, Math.min(50, Number(limitArg) || 10))
+
+  const allDiscovered = scanSessions()
+  const knownIds = new Set(getAllSessions(db).map((s) => s.id))
+  const unknown = allDiscovered
+    .filter((s) => !knownIds.has(s.id))
+    .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+    .slice(0, limit)
+
+  if (unknown.length === 0) {
+    discoverCache = []
+    return "No new local sessions found."
+  }
+
+  discoverCache = unknown
+
+  const rows = unknown.map((s, i) => {
+    const dir = s.cwd.replace(homedir(), "~")
+    const name = s.title ?? s.id.slice(0, 8)
+    return `| ${i + 1} | ${name} | ${dir} | ${s.gitBranch ?? "-"} | ${timeAgo(s.lastActivity)} |`
+  })
+
+  return [
+    `Found **${unknown.length}** local session(s). Use \`/attach #N\` to connect.`,
+    "",
+    "| # | Name | Directory | Branch | Last active |",
+    "|---|------|-----------|--------|-------------|",
+    ...rows,
+  ].join("\n")
 }
 
 // --- /list ---
@@ -162,20 +205,84 @@ async function handleAttach(
   config: Config,
   logger: Logger,
 ): Promise<string> {
-  if (!name) return "Usage: `/attach <name>`";
+  if (!name) return "Usage: `/attach <name>` or `/attach #N` (from /discover)";
+
+  // Handle #N reference from /discover
+  if (name.startsWith("#")) {
+    const idx = Number(name.slice(1)) - 1;
+    const discovered = discoverCache[idx];
+    if (!discovered) return `Invalid reference \`${name}\`. Run /discover first.`;
+    return attachDiscovered(discovered, client, db, config, logger);
+  }
 
   const session = getSessionByName(db, name);
-  if (!session) return `Session \`${name}\` not found.`;
+  if (!session) return `Session \`${name}\` not found. Use /discover to find local sessions.`;
 
   if (session.status === "active" && session.pid) {
     return `Session \`${name}\` is already active.`;
   }
 
+  return resumeSession(session, client, db, config, logger);
+}
+
+async function attachDiscovered(
+  discovered: DiscoveredSession,
+  client: MatrixClient,
+  db: Database.Database,
+  config: Config,
+  logger: Logger,
+): Promise<string> {
+  // Check if it was already attached since discovery
+  const existing = getSessionById(db, discovered.id);
+  if (existing) return resumeSession(existing, client, db, config, logger);
+
+  const port = nextFreePort(db, config.ports.start, config.ports.end);
+  if (port == null) return "No free ports available.";
+
+  const name = discoveredName(discovered, db);
+  const domain = config.matrix.botUserId.split(":")[1];
+  const spaceId = getConfig(db, "space_id");
+
+  const roomId = await client.createRoom({
+    name,
+    topic: `Claude session — ${discovered.cwd}`,
+    preset: "private_chat",
+    invite: [config.matrix.ownerUserId],
+  });
+
+  await addRoomToSpace(client, spaceId, roomId, domain, logger);
+
+  const session: Session = {
+    id: discovered.id,
+    room_id: roomId,
+    name,
+    working_directory: discovered.cwd,
+    model: config.claude.model,
+    permission_mode: "default",
+    port,
+    pid: null,
+    status: "active",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    last_message_at: null,
+  };
+  createSession(db, session);
+
+  return resumeSession(session, client, db, config, logger);
+}
+
+async function resumeSession(
+  session: Session,
+  client: MatrixClient,
+  db: Database.Database,
+  config: Config,
+  logger: Logger,
+): Promise<string> {
   // Allocate port if needed (archived sessions have port = null)
   let port = session.port;
   if (!port) {
     port = nextFreePort(db, config.ports.start, config.ports.end);
-    if (!port) return `No free ports available.`;
+    if (!port) return "No free ports available.";
   }
 
   // Update session
@@ -200,13 +307,13 @@ async function handleAttach(
 
   const healthy = await waitForHealth(port, logger, 30000);
   if (!healthy) {
-    return `Session \`${name}\` re-attached but relay not responding on port ${port}.`;
+    return `Session \`${session.name}\` re-attached but relay not responding on port ${port}.`;
   }
 
   connectSSE(
     port,
     (event) => handleSSEEvent(event, updated, client, db, logger),
-    (err) => logger.error({ err, session: name }, "SSE connection error"),
+    (err) => logger.error({ err, session: session.name }, "SSE connection error"),
     logger,
   );
 
@@ -217,7 +324,7 @@ async function handleAttach(
     );
   }
 
-  return `Session **${name}** re-attached.`;
+  return `Session **${session.name}** re-attached → [${session.name}](https://matrix.to/#/${session.room_id})`;
 }
 
 // --- /status ---
@@ -253,6 +360,30 @@ function expandTilde(p: string): string {
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
   if (p === "~") return homedir();
   return p;
+}
+
+function discoveredName(discovered: DiscoveredSession, db: Database.Database): string {
+  // Prefer user-set customTitle
+  if (discovered.title && discovered.title !== discovered.id) {
+    const cleaned = discovered.title
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9-]/g, "-")
+      .replaceAll(/-+/g, "-");
+    if (!getSessionByName(db, cleaned)) return cleaned;
+  }
+
+  // Fallback: dirname-branch-shortid
+  const dirName = basename(discovered.cwd);
+  const shortId = discovered.id.slice(0, 4);
+  const parts = [dirName, discovered.gitBranch, shortId].filter(Boolean);
+  const name = parts
+    .join("-")
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9-]/g, "-")
+    .replaceAll(/-+/g, "-");
+
+  if (!getSessionByName(db, name)) return name;
+  return `${name}-${Date.now()}`;
 }
 
 function autoName(workDir: string, db: Database.Database): string {
