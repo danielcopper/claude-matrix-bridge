@@ -239,7 +239,7 @@ async function attachDiscovered(
   const port = nextFreePort(db, config.ports.start, config.ports.end);
   if (port == null) return "No free ports available.";
 
-  const name = autoName(discovered.cwd, db);
+  const name = discoveredName(discovered, db);
   const domain = config.matrix.botUserId.split(":")[1];
   const spaceId = getConfig(db, "space_id");
 
@@ -360,6 +360,30 @@ function expandTilde(p: string): string {
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
   if (p === "~") return homedir();
   return p;
+}
+
+function discoveredName(discovered: DiscoveredSession, db: Database.Database): string {
+  // Prefer user-set customTitle
+  if (discovered.title && discovered.title !== discovered.id) {
+    const cleaned = discovered.title
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9-]/g, "-")
+      .replaceAll(/-+/g, "-");
+    if (!getSessionByName(db, cleaned)) return cleaned;
+  }
+
+  // Fallback: dirname-branch-shortid
+  const dirName = basename(discovered.cwd);
+  const shortId = discovered.id.slice(0, 4);
+  const parts = [dirName, discovered.gitBranch, shortId].filter(Boolean);
+  const name = parts
+    .join("-")
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9-]/g, "-")
+    .replaceAll(/-+/g, "-");
+
+  if (!getSessionByName(db, name)) return name;
+  return `${name}-${Date.now()}`;
 }
 
 function autoName(workDir: string, db: Database.Database): string {
