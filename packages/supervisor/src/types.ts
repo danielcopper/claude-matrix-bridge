@@ -37,7 +37,10 @@ export interface PermissionRequest {
 
 export interface DiscoveredSession {
   id: string
-  title: string | null
+  /** User-set title (from custom-title JSONL record) */
+  customTitle: string | null
+  /** Claude Code auto-generated slug (e.g. "iterative-sauteeing-papert") */
+  slug: string | null
   cwd: string
   gitBranch: string | null
   lastActivity: string
