@@ -4,6 +4,7 @@ bun = "latest"
 
 [tasks.install]
 description = "Install all dependencies"
+env = { NODE_ENV = "development" }
 run = """
 cd packages/matrix-relay && bun install
 cd ../../packages/supervisor && npm install

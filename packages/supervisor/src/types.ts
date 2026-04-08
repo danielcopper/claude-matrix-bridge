@@ -33,6 +33,16 @@ export interface PermissionRequest {
   resolved_at: string | null
 }
 
+// --- Discovered sessions (from ~/.claude/projects/) ---
+
+export interface DiscoveredSession {
+  id: string
+  title: string | null
+  cwd: string
+  gitBranch: string | null
+  lastActivity: string
+}
+
 // --- SSE Events from relay plugin ---
 
 export interface ReplyEvent {
