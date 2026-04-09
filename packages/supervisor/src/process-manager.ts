@@ -8,6 +8,22 @@ import { updateSession, expireSessionPermissions } from './database.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+/**
+ * Dedicated tmux socket for the bridge. Separates our sessions from the
+ * user's normal tmux (visible only via `tmux -L claude-matrix-bridge ls`).
+ */
+const TMUX_SOCKET = 'claude-matrix-bridge'
+
+/**
+ * Prepend socket and "no config" flags so our tmux server never loads
+ * the user's ~/.tmux.conf (would pull in continuum/resurrect/etc.).
+ * Once the server is running, -f is ignored by subsequent commands,
+ * but including it is harmless and keeps calls uniform.
+ */
+function tmuxArgs(...args: string[]): string[] {
+  return ['-L', TMUX_SOCKET, '-f', '/dev/null', ...args]
+}
+
 // Track active tmux session names for cleanup
 export const activeSessions = new Set<string>()
 
@@ -25,6 +41,23 @@ function tmuxSessionName(session: Session): string {
 
 function quoteArg(a: string): string {
   return `'${a}'`
+}
+
+/**
+ * Kill the entire dedicated tmux server. Used for recovery on startup
+ * to guarantee a clean slate. Silent if the server doesn't exist.
+ */
+export function killTmuxServer(logger: Logger): void {
+  try {
+    execFileSync('tmux', tmuxArgs('kill-server'), {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    logger.info({ socket: TMUX_SOCKET }, 'Killed stale tmux server on startup')
+  } catch {
+    // Server didn't exist — fine
+  }
 }
 
 export async function ensureRelayRegistered(logger: Logger): Promise<void> {
@@ -116,7 +149,7 @@ export function spawnClaude(
 
   // Kill stale tmux session with same name if it exists
   try {
-    execFileSync('tmux', ['kill-session', '-t', tmuxName], {
+    execFileSync('tmux', tmuxArgs('kill-session', '-t', tmuxName), {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -128,13 +161,13 @@ export function spawnClaude(
 
   // Create a detached tmux session running claude
   try {
-    execFileSync('tmux', [
+    execFileSync('tmux', tmuxArgs(
       'new-session',
       '-d',                    // detached
       '-s', tmuxName,          // session name
       '-c', session.working_directory,  // working directory
       claudeCmd,               // command to run
-    ], {
+    ), {
       encoding: 'utf-8',
       timeout: 10000,
     })
@@ -153,13 +186,13 @@ export function spawnClaude(
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise(r => setTimeout(r, 500))
       try {
-        const pane = execFileSync('tmux', ['capture-pane', '-t', tmuxName, '-p'], {
+        const pane = execFileSync('tmux', tmuxArgs('capture-pane', '-t', tmuxName, '-p'), {
           encoding: 'utf-8',
           timeout: 3000,
           stdio: ['pipe', 'pipe', 'pipe'],
         })
         if (pane.includes('I am using this for local development')) {
-          execFileSync('tmux', ['send-keys', '-t', tmuxName, 'Enter'], {
+          execFileSync('tmux', tmuxArgs('send-keys', '-t', tmuxName, 'Enter'), {
             encoding: 'utf-8',
             timeout: 3000,
             stdio: ['pipe', 'pipe', 'pipe'],
@@ -180,9 +213,9 @@ export function spawnClaude(
 
   // Get the PID of the claude process inside tmux
   try {
-    const paneInfo = execFileSync('tmux', [
+    const paneInfo = execFileSync('tmux', tmuxArgs(
       'list-panes', '-t', tmuxName, '-F', '#{pane_pid}',
-    ], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+    ), { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim()
 
     const pid = Number(paneInfo)
     if (pid) {
@@ -196,7 +229,7 @@ export function spawnClaude(
   // Monitor tmux session — poll for exit
   const pollInterval = setInterval(() => {
     try {
-      execFileSync('tmux', ['has-session', '-t', tmuxName], {
+      execFileSync('tmux', tmuxArgs('has-session', '-t', tmuxName), {
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -231,7 +264,7 @@ export async function killClaude(
 
   // Send Ctrl+C to Claude first (graceful)
   try {
-    execFileSync('tmux', ['send-keys', '-t', tmuxName, 'C-c', ''], {
+    execFileSync('tmux', tmuxArgs('send-keys', '-t', tmuxName, 'C-c', ''), {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -244,7 +277,7 @@ export async function killClaude(
   await new Promise(r => setTimeout(r, 3000))
 
   try {
-    execFileSync('tmux', ['kill-session', '-t', tmuxName], {
+    execFileSync('tmux', tmuxArgs('kill-session', '-t', tmuxName), {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -265,31 +298,9 @@ export async function killAllProcesses(logger: Logger): Promise<void> {
     exitPollers.delete(id)
   }
 
-  // Kill all tmux sessions with claude- prefix
-  try {
-    const sessions = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim().split('\n')
-
-    for (const name of sessions) {
-      if (name.startsWith('claude-')) {
-        try {
-          execFileSync('tmux', ['kill-session', '-t', name], {
-            encoding: 'utf-8',
-            timeout: 5000,
-            stdio: ['pipe', 'pipe', 'pipe'],
-          })
-          logger.info({ tmux: name }, 'Killed tmux session')
-        } catch {
-          // Already gone
-        }
-      }
-    }
-  } catch {
-    // tmux not running or no sessions
-  }
+  // Kill our entire tmux server — clean and thorough, since we have
+  // a dedicated socket and nothing else lives there.
+  killTmuxServer(logger)
 
   activeSessions.clear()
   recentlySpawned.clear()
