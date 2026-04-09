@@ -99,6 +99,14 @@ export function getActiveSessions(db: Database.Database): Session[] {
   return db.prepare("SELECT * FROM sessions WHERE status = 'active'").all() as Session[]
 }
 
+/**
+ * Ports reserved between nextFreePort and the actual DB commit. Prevents a
+ * race where two concurrent /new handlers allocate the same port because
+ * neither has written its session to the DB yet. Caller must releasePort
+ * after createSession commits (or on any error path).
+ */
+const reservedPorts = new Set<number>()
+
 export function nextFreePort(
   db: Database.Database,
   portStart: number,
@@ -110,9 +118,16 @@ export function nextFreePort(
       .map((s) => s.port),
   )
   for (let port = portStart; port <= portEnd; port++) {
-    if (!usedPorts.has(port)) return port
+    if (!usedPorts.has(port) && !reservedPorts.has(port)) {
+      reservedPorts.add(port)
+      return port
+    }
   }
   return null
+}
+
+export function releasePort(port: number): void {
+  reservedPorts.delete(port)
 }
 
 export function createSession(db: Database.Database, session: Session): void {

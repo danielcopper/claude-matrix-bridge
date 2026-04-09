@@ -7,6 +7,7 @@ import {
   getLocalActiveSessions,
   updateSession,
   nextFreePort,
+  releasePort,
 } from './database.js'
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
 import { ensureRelayRegistered, spawnClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
@@ -97,6 +98,8 @@ if (activeSessions.length > 0) {
     }
     const restored = { ...session, port }
     updateSession(db, session.id, { port })
+    // Port now in DB, release the in-memory reservation
+    releasePort(port)
     try {
       spawnClaude(restored, config, db, logger, {
         resume: true,
