@@ -295,7 +295,11 @@ function handleControlRoomMessage(
         })
       } catch (err) {
         logger.error({ err }, 'Command handler error')
-        await client.sendText(controlRoomId, `Error: ${err instanceof Error ? err.message : err}`)
+        try {
+          await client.sendText(controlRoomId, `Error: ${err instanceof Error ? err.message : err}`)
+        } catch (sendErr) {
+          logger.error({ err: sendErr }, 'Failed to send error message to control room')
+        }
       }
     })()
     return
