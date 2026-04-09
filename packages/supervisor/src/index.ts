@@ -2,7 +2,7 @@ import pino from 'pino'
 import { loadConfig } from './config.js'
 import { openDatabase, runMigrations, getActiveSessions, updateSession, nextFreePort } from './database.js'
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
-import { ensureRelayRegistered, spawnClaude, killAllProcesses } from './process-manager.js'
+import { ensureRelayRegistered, spawnClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
 import { startApiServer } from './api.js'
 
@@ -18,10 +18,26 @@ logger.info('Starting supervisor')
 const db = openDatabase(config.database.path)
 runMigrations(db)
 
-// Expire all pending permission requests from previous run —
-// Claude sessions will be restarted fresh, old permission dialogs are gone
+// --- Recovery / Startup Cleanup ---
+// See docs/AUTO_HANDOFF.md "Recovery / Supervisor Restart" for rationale.
+
+// 1. Expire all pending permission requests from previous run —
+//    sessions will be restarted fresh, old permission dialogs are gone.
 db.prepare('UPDATE permission_requests SET status = ?, resolved_at = ? WHERE status = ?')
   .run('expired', new Date().toISOString(), 'pending')
+
+// 2. Legacy handed_off state → detached (from earlier handoff design).
+//    Kept for DB compatibility; handed_off will be removed entirely in Phase 2.
+db.prepare("UPDATE sessions SET status = 'detached' WHERE status = 'handed_off'").run()
+
+// 3. Clear stale PIDs — previous process IDs are no longer trustworthy
+//    after a restart. Fresh spawns below will set new ones.
+db.prepare("UPDATE sessions SET pid = NULL WHERE status = 'active' AND pid IS NOT NULL").run()
+
+// 4. Always fresh tmux server. If our socket has leftover sessions from
+//    a crash or graceful shutdown where we didn't clean up, wipe them
+//    before respawning. Silent if the server doesn't exist.
+killTmuxServer(logger)
 
 logger.info({ path: config.database.path }, 'Database ready')
 

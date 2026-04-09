@@ -77,36 +77,81 @@ if [[ "$INSTALL_HOOKS" =~ ^[Yy]$ ]]; then
 
   mkdir -p "$(dirname "$SETTINGS_FILE")"
 
-  if [ -f "$SETTINGS_FILE" ]; then
-    # Merge hooks into existing settings
-    if command -v python3 >/dev/null 2>&1; then
-      python3 -c "
-import json, sys
-try:
-    with open('$SETTINGS_FILE') as f:
-        settings = json.load(f)
-except:
-    settings = {}
-hooks = settings.setdefault('hooks', {})
-hooks['SessionStart'] = [{'matcher': 'resume', 'hooks': [{'type': 'command', 'command': '$HOOK_SCRIPT start', 'timeout': 5000}]}]
-hooks['SessionEnd'] = [{'matcher': '', 'hooks': [{'type': 'command', 'command': '$HOOK_SCRIPT end', 'timeout': 5000}]}]
-with open('$SETTINGS_FILE', 'w') as f:
-    json.dump(settings, f, indent=2)
-"
-      info "Hooks added to $SETTINGS_FILE"
-    else
-      warn "python3 not found — add hooks manually to $SETTINGS_FILE"
-    fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found — please add the following hooks manually to $SETTINGS_FILE:"
+    echo "  SessionStart (matcher 'resume'): $HOOK_SCRIPT start"
+    echo "  SessionEnd:                      $HOOK_SCRIPT end"
   else
-    cat > "$SETTINGS_FILE" <<HOOKS
-{
-  "hooks": {
-    "SessionStart": [{"matcher": "resume", "hooks": [{"type": "command", "command": "$HOOK_SCRIPT start", "timeout": 5000}]}],
-    "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "$HOOK_SCRIPT end", "timeout": 5000}]}]
-  }
-}
-HOOKS
-    info "Created $SETTINGS_FILE with hooks"
+    # Non-destructive, idempotent hook installation.
+    # - Preserves any existing hooks the user has configured.
+    # - Won't add our hook twice if install.sh is run multiple times.
+    # - Detects our hook by the 'session-hook.sh' marker in command strings.
+    HOOK_SCRIPT="$HOOK_SCRIPT" SETTINGS_FILE="$SETTINGS_FILE" python3 - <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+settings_path = Path(os.environ["SETTINGS_FILE"])
+hook_script = os.environ["HOOK_SCRIPT"]
+marker = "session-hook.sh"
+
+# Load existing settings or start fresh
+if settings_path.exists():
+    try:
+        settings = json.loads(settings_path.read_text())
+    except Exception as e:
+        print(f"[ERROR] Failed to parse {settings_path}: {e}", file=sys.stderr)
+        print("[ERROR] Fix it manually before re-running install.sh", file=sys.stderr)
+        sys.exit(1)
+else:
+    settings = {}
+
+hooks = settings.setdefault("hooks", {})
+
+def already_installed(hook_list):
+    return any(marker in json.dumps(h) for h in hook_list)
+
+changes = []
+
+# SessionStart: matcher 'resume' (fires when user runs claude --resume)
+session_start = hooks.setdefault("SessionStart", [])
+if already_installed(session_start):
+    print("[INFO] SessionStart hook already installed, skipping")
+else:
+    session_start.append({
+        "matcher": "resume",
+        "hooks": [{
+            "type": "command",
+            "command": f"{hook_script} start",
+            "timeout": 5000,
+        }],
+    })
+    changes.append("SessionStart")
+
+# SessionEnd: any matcher (fires when claude process exits)
+session_end = hooks.setdefault("SessionEnd", [])
+if already_installed(session_end):
+    print("[INFO] SessionEnd hook already installed, skipping")
+else:
+    session_end.append({
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": f"{hook_script} end",
+            "timeout": 5000,
+        }],
+    })
+    changes.append("SessionEnd")
+
+# Only write if we actually changed something
+if changes:
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    print(f"[INFO] Added hooks to {settings_path}: {', '.join(changes)}")
+else:
+    print(f"[INFO] All hooks already present in {settings_path}")
+PYEOF
+    if [ $? -ne 0 ]; then
+      error "Failed to update $SETTINGS_FILE"
+    fi
   fi
 else
   info "Skipping hooks. You can add them later — see README."

@@ -64,7 +64,10 @@ export function getAllSessions(db: Database.Database): Session[] {
 }
 
 export function getActiveSessions(db: Database.Database): Session[] {
-  return db.prepare('SELECT * FROM sessions WHERE status = ? AND pid IS NOT NULL').all('active') as Session[]
+  // Returns all sessions with status='active' regardless of pid.
+  // The pid may be null after startup recovery (we clear stale pids and
+  // respawn) — the restore loop uses this query to find what to spawn.
+  return db.prepare("SELECT * FROM sessions WHERE status = 'active'").all() as Session[]
 }
 
 export function nextFreePort(

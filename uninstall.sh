@@ -13,7 +13,8 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo ""
 echo "This will:"
 echo "  - Stop and remove the systemd service"
-echo "  - Kill all Claude tmux sessions"
+echo "  - Kill the dedicated tmux server (socket: claude-matrix-bridge)"
+echo "  - Remove our session handoff hooks from ~/.claude/settings.json"
 echo "  - Remove the matrix-relay MCP registration"
 echo "  - Remove build artifacts and node_modules"
 echo ""
@@ -22,6 +23,8 @@ echo "  - The git repository"
 echo "  - The .env file"
 echo "  - The SQLite database (data/bot.db)"
 echo "  - Matrix rooms (those stay on your homeserver)"
+echo "  - Your own hooks or any other ~/.claude/settings.json contents"
+echo "  - Your normal tmux sessions (different socket)"
 echo ""
 read -rp "Continue? [y/N] " CONFIRM
 [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
@@ -40,15 +43,53 @@ if [ -f /etc/systemd/system/claude-matrix-bridge.service ]; then
   sudo systemctl daemon-reload
 fi
 
-# --- tmux sessions ---
+# --- tmux sessions (our dedicated socket) ---
 
-CLAUDE_SESSIONS=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude-' || true)
-if [ -n "$CLAUDE_SESSIONS" ]; then
-  info "Killing Claude tmux sessions..."
-  echo "$CLAUDE_SESSIONS" | while read -r name; do
-    tmux kill-session -t "$name" 2>/dev/null
-    info "  Killed $name"
-  done
+if tmux -L claude-matrix-bridge kill-server 2>/dev/null; then
+  info "Killed dedicated tmux server (socket: claude-matrix-bridge)"
+fi
+
+# --- Session handoff hooks ---
+
+SETTINGS_FILE="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS_FILE" ] && command -v python3 >/dev/null 2>&1; then
+  # Remove only our hooks, leave everything else intact
+  SETTINGS_FILE="$SETTINGS_FILE" python3 - <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+settings_path = Path(os.environ["SETTINGS_FILE"])
+marker = "session-hook.sh"
+
+try:
+    settings = json.loads(settings_path.read_text())
+except Exception:
+    sys.exit(0)
+
+hooks = settings.get("hooks")
+if not hooks:
+    sys.exit(0)
+
+def strip_ours(hook_list):
+    return [h for h in hook_list if marker not in json.dumps(h)]
+
+changed = False
+for event in ("SessionStart", "SessionEnd"):
+    if event in hooks:
+        filtered = strip_ours(hooks[event])
+        if len(filtered) != len(hooks[event]):
+            changed = True
+            if filtered:
+                hooks[event] = filtered
+            else:
+                del hooks[event]
+
+if changed:
+    if not hooks:
+        settings.pop("hooks", None)
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    print(f"[INFO] Removed bridge hooks from {settings_path}")
+PYEOF
 fi
 
 # --- MCP registration ---

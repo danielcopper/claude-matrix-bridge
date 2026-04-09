@@ -111,12 +111,16 @@ export async function bootstrapSpaceAndRooms(
     }
   }
 
-  // Ensure owner is invited to both space and control room
+  // Ensure owner is invited to both space and control room.
+  // Check membership first (GET, not rate-limited) so we don't burn
+  // through the invite rate limit with redundant M_FORBIDDEN failures.
   for (const roomId of [spaceId, controlRoomId]) {
     try {
+      const members = await client.getJoinedRoomMembers(roomId)
+      if (members.includes(config.matrix.ownerUserId)) continue
       await client.inviteUser(config.matrix.ownerUserId, roomId)
-    } catch {
-      // Already joined or invited — ignore
+    } catch (err) {
+      logger.warn({ err, roomId }, 'Could not ensure owner membership')
     }
   }
 
@@ -295,7 +299,10 @@ function handleControlRoomMessage(
         })
       } catch (err) {
         logger.error({ err }, 'Command handler error')
-        await client.sendText(controlRoomId, `Error: ${err instanceof Error ? err.message : err}`)
+        const msg = `Error: ${err instanceof Error ? err.message : err}`
+        await client.sendText(controlRoomId, msg).catch((error_: unknown) => {
+          logger.error({ err: error_ }, 'Failed to send error message to control room')
+        })
       }
     })()
     return

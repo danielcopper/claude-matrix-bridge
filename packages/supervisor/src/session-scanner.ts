@@ -45,34 +45,49 @@ function parseLines(raw: string): unknown[] {
   return results
 }
 
-function extractMetadata(lines: unknown[]): {
+interface ExtractedMetadata {
   sessionId: string | null
   customTitle: string | null
   slug: string | null
   cwd: string | null
   gitBranch: string | null
   timestamp: string | null
-} {
-  let sessionId: string | null = null
-  let customTitle: string | null = null
-  let slug: string | null = null
-  let cwd: string | null = null
-  let gitBranch: string | null = null
-  let timestamp: string | null = null
+}
+
+/** Read a string field from a record or return null. */
+function pickString(rec: Record<string, unknown>, key: string): string | null {
+  const v = rec[key]
+  return typeof v === 'string' ? v : null
+}
+
+/** Collect session metadata from parsed JSONL records. First non-null wins,
+ *  except timestamp which tracks the most recent seen. */
+function extractMetadata(lines: unknown[]): ExtractedMetadata {
+  const meta: ExtractedMetadata = {
+    sessionId: null,
+    customTitle: null,
+    slug: null,
+    cwd: null,
+    gitBranch: null,
+    timestamp: null,
+  }
 
   for (const obj of lines) {
     if (typeof obj !== 'object' || obj === null) continue
     const rec = obj as Record<string, unknown>
 
-    if (!sessionId && typeof rec.sessionId === 'string') sessionId = rec.sessionId
-    if (!customTitle && rec.type === 'custom-title' && typeof rec.customTitle === 'string') customTitle = rec.customTitle
-    if (!slug && typeof rec.slug === 'string') slug = rec.slug
-    if (!cwd && typeof rec.cwd === 'string') cwd = rec.cwd
-    if (!gitBranch && typeof rec.gitBranch === 'string') gitBranch = rec.gitBranch
-    if (typeof rec.timestamp === 'string') timestamp = rec.timestamp
+    meta.sessionId ??= pickString(rec, 'sessionId')
+    meta.slug ??= pickString(rec, 'slug')
+    meta.cwd ??= pickString(rec, 'cwd')
+    meta.gitBranch ??= pickString(rec, 'gitBranch')
+    meta.timestamp = pickString(rec, 'timestamp') ?? meta.timestamp
+
+    if (!meta.customTitle && rec.type === 'custom-title') {
+      meta.customTitle = pickString(rec, 'customTitle')
+    }
   }
 
-  return { sessionId, customTitle, slug, cwd, gitBranch, timestamp }
+  return meta
 }
 
 export function scanSessions(): DiscoveredSession[] {
