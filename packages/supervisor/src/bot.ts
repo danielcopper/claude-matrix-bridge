@@ -367,12 +367,23 @@ export function setupEventHandlers(
   controlRoomId: string,
   logger: Logger,
 ): void {
+  // Ignore events older than supervisor startup. Protects against re-processing
+  // historical commands when sync state is missing (fresh worktree, first run
+  // without a bot-sync.json). 10s slack for clock skew.
+  const ignoreBeforeMs = Date.now() - 10_000
+
   client.on('room.message', (roomId: string, event: Record<string, unknown>) => {
     const content = event.content as Record<string, unknown> | undefined
     if (!content?.msgtype) return
     const sender = event.sender as string
     if (sender === config.matrix.botUserId) return
     if (sender !== config.matrix.ownerUserId) return
+
+    const ts = event.origin_server_ts
+    if (typeof ts === 'number' && ts < ignoreBeforeMs) {
+      logger.debug({ roomId, ts }, 'Ignoring stale event from before supervisor startup')
+      return
+    }
 
     const body = content.body as string
     if (!body) return
@@ -393,6 +404,9 @@ export function setupEventHandlers(
     if (event.type !== 'm.reaction') return
     const sender = event.sender as string
     if (sender !== config.matrix.ownerUserId) return
+
+    const ts = event.origin_server_ts
+    if (typeof ts === 'number' && ts < ignoreBeforeMs) return
 
     const content = event.content as Record<string, unknown>
     const relatesTo = content['m.relates_to'] as Record<string, unknown> | undefined
