@@ -331,6 +331,15 @@ function handleSessionRoomMessage(
     void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
     return
   }
+  if (session.status === 'local_active') {
+    // Phase 3 will implement auto-attach (kill local PID + resume + reply).
+    // For Phase 2, just inform the user that the session is locked to the terminal.
+    void client.sendText(
+      roomId,
+      `Session is currently active in a local terminal (PID ${session.local_pid ?? '?'}). Exit the local claude first or wait for Phase 3 auto-attach.`,
+    )
+    return
+  }
   const port = session.port
   if (!port) {
     void client.sendText(roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`)

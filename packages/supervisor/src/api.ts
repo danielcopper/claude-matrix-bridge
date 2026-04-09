@@ -4,7 +4,7 @@ import type { MatrixClient } from 'matrix-bot-sdk'
 import type { Logger } from 'pino'
 import type { Config } from './config.js'
 import { getSessionById, updateSession } from './database.js'
-import { recentlySpawned } from './process-manager.js'
+import { recentlySpawned, killClaude } from './process-manager.js'
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -76,6 +76,7 @@ async function handleSessionStart(
 ): Promise<void> {
   const body = await readBody(req)
   const sessionId = body.session_id as string | undefined
+  const localPid = typeof body.pid === 'number' ? body.pid : null
   if (!sessionId) {
     json(res, 400, { error: 'session_id required' })
     return
@@ -94,20 +95,50 @@ async function handleSessionStart(
     return
   }
 
-  if (session.status !== 'active') {
-    json(res, 200, { status: session.status, action: 'none' })
+  // Already marked local_active (e.g., hook fired twice) → just update PID
+  if (session.status === 'local_active') {
+    updateSession(db, session.id, { local_pid: localPid })
+    json(res, 200, { status: 'local_active', action: 'updated_pid' })
     return
   }
 
-  // Informational only — tmux keeps running, Matrix keeps routing
-  logger.info({ session: session.name }, 'Session also active in local terminal')
-  updateSession(db, session.id, { status: 'handed_off' })
-
-  if (session.room_id) {
-    void client.sendText(session.room_id, 'User also active in local terminal.').catch(() => {})
+  // Archived sessions are no longer tracked
+  if (session.status === 'archived') {
+    json(res, 200, { status: 'archived', action: 'none' })
+    return
   }
 
-  json(res, 200, { status: 'handed_off', action: 'marked' })
+  // Active: the supervisor currently holds the session in tmux.
+  // Kill our claude and hand control to the local terminal.
+  if (session.status === 'active') {
+    logger.info(
+      { session: session.name, localPid },
+      'Auto-detach: local terminal claimed session, killing supervisor claude',
+    )
+    try {
+      await killClaude(session, logger)
+    } catch (err) {
+      logger.warn({ err, session: session.name }, 'killClaude failed during auto-detach')
+    }
+  } else {
+    // Detached/handed_off: no claude to kill, just transition state.
+    logger.info({ session: session.name, localPid }, 'Session claimed by local terminal')
+  }
+
+  updateSession(db, session.id, {
+    status: 'local_active',
+    local_pid: localPid,
+    pid: null,
+  })
+
+  if (session.room_id) {
+    const msg = localPid
+      ? `Session handed off to local terminal (PID ${localPid}). Send a new message here to reclaim control.`
+      : 'Session handed off to local terminal. Send a new message here to reclaim control.'
+    void client.sendText(session.room_id, msg).catch(() => {})
+  }
+
+  json(res, 200, { status: 'local_active', action: 'detached' })
 }
 
 async function handleSessionEnd(
@@ -130,18 +161,23 @@ async function handleSessionEnd(
     return
   }
 
-  if (session.status !== 'handed_off') {
+  // Only relevant if we thought the session was local_active.
+  if (session.status !== 'local_active') {
     json(res, 200, { status: session.status, action: 'none' })
     return
   }
 
-  // Local session ended — just reset status, tmux is still running
-  logger.info({ session: session.name }, 'Local session ended, Matrix-only again')
-  updateSession(db, session.id, { status: 'active' })
+  logger.info({ session: session.name }, 'Local session ended, session now idle')
+  updateSession(db, session.id, { status: 'detached', local_pid: null })
 
   if (session.room_id) {
-    void client.sendText(session.room_id, 'Local session ended.').catch(() => {})
+    void client
+      .sendText(
+        session.room_id,
+        'Local session ended. Send a message to reclaim this session in Matrix.',
+      )
+      .catch(() => {})
   }
 
-  json(res, 200, { status: 'active', action: 'reset' })
+  json(res, 200, { status: 'detached', action: 'released' })
 }

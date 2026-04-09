@@ -1,6 +1,13 @@
 import pino from 'pino'
 import { loadConfig } from './config.js'
-import { openDatabase, runMigrations, getActiveSessions, updateSession, nextFreePort } from './database.js'
+import {
+  openDatabase,
+  runMigrations,
+  getActiveSessions,
+  getLocalActiveSessions,
+  updateSession,
+  nextFreePort,
+} from './database.js'
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
 import { ensureRelayRegistered, spawnClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
@@ -38,6 +45,30 @@ db.prepare("UPDATE sessions SET pid = NULL WHERE status = 'active' AND pid IS NO
 //    a crash or graceful shutdown where we didn't clean up, wipe them
 //    before respawning. Silent if the server doesn't exist.
 killTmuxServer(logger)
+
+// 5. For local_active sessions, verify the local claude PID is still alive.
+//    - Alive: supervisor-only crash, the local terminal is still holding the
+//      session; leave it alone, next Matrix message will trigger auto-attach.
+//    - Dead: full crash or local exit we missed; fall back to 'detached'.
+for (const session of getLocalActiveSessions(db)) {
+  if (session.local_pid) {
+    try {
+      process.kill(session.local_pid, 0)
+      logger.info(
+        { session: session.name, pid: session.local_pid },
+        'Local claude still alive after recovery',
+      )
+      continue
+    } catch {
+      // Process dead — fall through to detached reset
+    }
+  }
+  updateSession(db, session.id, { status: 'detached', local_pid: null })
+  logger.info(
+    { session: session.name },
+    'Local claude gone, resetting local_active → detached',
+  )
+}
 
 logger.info({ path: config.database.path }, 'Database ready')
 

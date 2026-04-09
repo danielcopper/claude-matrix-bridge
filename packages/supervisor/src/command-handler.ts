@@ -265,6 +265,8 @@ async function attachDiscovered(
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     last_message_at: null,
+    local_pid: null,
+    last_matrix_activity: null,
   };
   createSession(db, session);
 
@@ -517,6 +519,8 @@ async function handleNew(
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     last_message_at: null,
+    local_pid: null,
+    last_matrix_activity: null,
   };
   createSession(db, session);
 

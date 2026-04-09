@@ -15,13 +15,17 @@ SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"
 EVENT=${1:-start}
 PORT=${CMB_API_PORT:-9090}
 
+# $PPID is the parent process = the claude CLI process itself.
+# The supervisor uses this to kill the local claude when Matrix reclaims the session.
+CLAUDE_PID=$PPID
+
 if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
 curl -s -X POST "http://127.0.0.1:${PORT}/api/session/${EVENT}" \
   -H "Content-Type: application/json" \
-  -d "{\"session_id\":\"${SESSION_ID}\"}" \
+  -d "{\"session_id\":\"${SESSION_ID}\",\"pid\":${CLAUDE_PID}}" \
   --connect-timeout 1 \
   --max-time 5 \
   > /dev/null 2>&1 \
