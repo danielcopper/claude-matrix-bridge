@@ -244,6 +244,88 @@ ALTER TABLE sessions ADD COLUMN last_matrix_activity TEXT;  -- ISO 8601
 - `local_pid`: PID des lokalen Claude-Prozesses (wenn `local_active`), sonst NULL
 - `last_matrix_activity`: Timestamp der letzten Message die Matrix gesehen hat (für Replay-Cutoff)
 
+## Recovery / Supervisor Restart
+
+Der Supervisor läuft als systemd-Service. Er kann aus mehreren Gründen neu starten:
+
+- **Full PC crash / Power loss / Reboot**: systemd, tmux, claude, alles weg
+- **Supervisor-only crash**: nur der Supervisor stirbt, tmux-Server und claude laufen weiter
+- **Geplanter Neustart**: `systemctl restart claude-matrix-bridge` (z.B. nach Update)
+
+Der Recovery-Flow muss alle drei Szenarien handhaben und **idempotent** sein — mehrfaches Ausführen darf nicht kaputt machen.
+
+### Strategy: Always Fresh
+
+**Entscheidung**: Bei jedem Startup killen wir den gesamten tmux-Server und spawnen alle aktiven Sessions neu. Einfach, predictable, konsistent. Die Alternative (Smart Reconnect zu bestehenden tmux/relay/claude-Prozessen) ist deutlich komplexer und rechtfertigt den Gewinn (~2-3s schnellere Recovery) nicht.
+
+Der einzige Nachteil: Bei einem Supervisor-only-Crash könnten wir in-flight Tool-Calls verlieren. Aber: die JSONL persistiert alles was vor dem Crash committed wurde. Nur laufende, noch nicht geschriebene Tool-Calls gehen verloren — das ist bei jeder Crash-Recovery der Fall.
+
+### Recovery Flow
+
+```
+SUPERVISOR STARTUP
+│
+├─ 1. DB Migrations ausführen
+│
+├─ 2. Alle pending permission_requests expire'n
+│     UPDATE permission_requests SET status='expired', resolved_at=?
+│     WHERE status='pending'
+│
+├─ 3. Legacy handed_off state → detached (falls noch aus alter DB vorhanden)
+│     UPDATE sessions SET status='detached' WHERE status='handed_off'
+│
+├─ 4. Tmux-Server komplett killen (fresh slate)
+│     tmux -L claude-matrix-bridge kill-server
+│     (falls Server nicht existiert: silent ignore)
+│
+├─ 5. Stale PIDs clearen
+│     UPDATE sessions SET pid=NULL WHERE status='active'
+│
+├─ 6. Local PID Check (für local_active Sessions):
+│     for session in sessions WHERE status='local_active':
+│       if session.local_pid:
+│         try process.kill(session.local_pid, 0):  // signal 0 = check only
+│           success → leave as-is
+│             (lokaler Claude lebt noch → Supervisor-only crash)
+│           failure → status='detached', local_pid=NULL
+│             (PC crash oder lokal beendet)
+│       else:
+│         status='detached', local_pid=NULL
+│
+├─ 7. Normal Restore Loop (existierende Logik):
+│     for session in sessions WHERE status='active':
+│       - spawn fresh claude in tmux mit --resume
+│       - waitForHealth(port)
+│       - connectSSE(port)
+│       - Post "Session restored" in Matrix-Room
+│
+└─ 8. Startup-Summary in Control Room:
+      "Supervisor started. Restored N session(s)."
+```
+
+### Edge Cases
+
+1. **Partial crash** (Supervisor weg, tmux+claude laufen): Wir killen die tmux-Sessions (Schritt 4), die relay-Plugins beenden sich → saubere Respawns in Schritt 7. **Verlust**: kurzzeitig offene Tool-Use-Requests, aber keine persistierten Daten.
+
+2. **Local Claude überlebt Supervisor-Crash**: Schritt 6 erkennt das via `process.kill(pid, 0)` und lässt den Status auf `local_active`. Der User merkt nichts — bei nächster Matrix-Message läuft der normale Auto-Attach-Flow (kill local + resume + replay).
+
+3. **tmux-Server war gar nicht gestartet** (erster Start nach Reboot): `tmux kill-server` wirft einen Fehler den wir ignorieren. Schritt 7 startet einen neuen Server beim ersten `new-session`.
+
+4. **DB hat Sessions aber keine JSONL-Files existieren** (z.B. manuell gelöscht): Beim Resume wirft claude einen Fehler. Wir fangen den ab und setzen status=`detached` oder `archived` (Entscheidung: `detached` ist permissiver).
+
+5. **Idempotent**: Wenn systemd in eine Restart-Loop kommt: jeder Run killt den Server (sauber), spawnt neu. Keine Akkumulation von Zombies, keine doppelten Spawns.
+
+### Konsequenz für die Phasen
+
+Die Recovery-Logik ist nicht eine separate Phase — sie ist **in Phase 1 integriert**:
+
+- Schritte 1-5: bereits im main-Stand vorhanden oder trivial zu ergänzen
+- Schritt 4 (kill-server): nur ein Command-Call zum bestehenden startup-Code
+- Schritt 6 (local PID check): kommt mit Phase 2 (wo wir `local_active` State einführen)
+- Schritt 7: bereits im main-Stand vorhanden
+
+Also: **Phase 1 enthält die Recovery-Grundlage** (kill-server + stale PID cleanup), **Phase 2 erweitert um den local_active Check**.
+
 ## Implementierungs-Phasen
 
 ### Phase 1: Dedicated tmux socket + Hook-Install Fix
@@ -259,21 +341,29 @@ Da wir von main abzweigen (SDK-Arbeit abandoned), ist das kein echter "Rollback"
    - `new-session`: auch mit `-f /dev/null` starten damit Server ohne Config startet
    - Erster Call bestimmt die Server-Config, folgende Commands können `-f /dev/null` weglassen aber konsistent ist besser
 
-**2. Hook-Install Fix** — `install.sh`:
+**2. Recovery-Grundlage** — `packages/supervisor/src/index.ts`:
+   - Beim Startup: `tmux -L claude-matrix-bridge kill-server` (silent ignore wenn nicht existiert)
+   - Stale PIDs in DB clearen: `UPDATE sessions SET pid=NULL WHERE status='active'`
+   - Legacy `handed_off` → `detached` Migration
+   - Danach: normaler Restore-Loop (wie gehabt)
+   - (Der `local_active` PID-Check kommt erst mit Phase 2, wenn der State eingeführt wird)
+
+**3. Hook-Install Fix** — `install.sh`:
    - Append-Logik statt Replace (siehe "Hook-Installation: Append statt Replace" oben)
    - Idempotent machen
    - Uninstall.sh: gezielt unseren Hook entfernen statt alles wegzuwerfen
 
-**3. Tests**:
+**4. Tests**:
    - `/new`, `/list`, `/detach`, `/attach`, `/kill`, `/discover` — alle funktionieren
-   - Supervisor-Restart: aktive Sessions werden korrekt restored
+   - Supervisor-Restart während laufender Sessions: tmux-Server wird gekillt, Sessions werden fresh restored, keine Zombies
+   - Supervisor-Restart ohne laufende Sessions: kein Fehler durch fehlenden tmux-Server
    - `tmux ls` (default): zeigt nur User-Sessions
    - `tmux -L claude-matrix-bridge ls`: zeigt unsere Sessions
    - `install.sh` zweimal ausführen: Hook erscheint nur einmal in settings.json
    - User-eigene existierende Hooks bleiben nach `install.sh` erhalten
    - `uninstall.sh`: unsere Hooks weg, User-Hooks bleiben
 
-**Akzeptanzkriterium**: Alles wie vorher, aber sauberer — Socket isoliert, Hooks non-destructive.
+**Akzeptanzkriterium**: Alles wie vorher, aber sauberer — Socket isoliert, Hooks non-destructive, clean Recovery nach Crash/Restart.
 
 ### Phase 2: Auto-Detach (SessionStart Hook mit PID)
 
@@ -290,8 +380,10 @@ Da wir von main abzweigen (SDK-Arbeit abandoned), ist das kein echter "Rollback"
 6. `packages/supervisor/src/api.ts` `handleSessionEnd`:
    - `status = 'detached'`, `local_pid = NULL`
 7. Matrix-Nachricht in Session-Room mit Info: "Session handed off to local terminal (PID X)"
+8. **Recovery-Erweiterung** in `index.ts` Startup: local PID Check für `local_active` Sessions
+   - `process.kill(local_pid, 0)` → alive: leave as-is, dead: → `detached`, clear `local_pid`
 
-**Akzeptanzkriterium**: Matrix aktiv → lokal `claude --resume <id>` → Supervisor-Claude stirbt, Status = `local_active`, Matrix-Room zeigt Handoff-Info.
+**Akzeptanzkriterium**: Matrix aktiv → lokal `claude --resume <id>` → Supervisor-Claude stirbt, Status = `local_active`, Matrix-Room zeigt Handoff-Info. Supervisor-Restart während lokaler Session läuft → Status bleibt `local_active` wenn lokaler Claude noch lebt.
 
 ### Phase 3: Auto-Attach + Kill lokal
 
