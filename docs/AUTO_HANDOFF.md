@@ -534,6 +534,15 @@ Entscheidungen die wir während der Implementierung treffen:
    - **C) Collision-Check ignoriert archived**: `parseNewArgs` filtert `status='archived'` aus dem Namens-Check. Erfordert aber Aufheben der UNIQUE Constraint auf `name` in der DB (oder gleichzeitigen hard-delete auf rename).
    - **Tendenz**: Option B — wenig destruktiv, behält History, einfacher UNIQUE-Constraint bleibt. Nicht Scope für Phase 1, eigener kleiner PR.
 10. **Name-Collision beim `/discover`-Attach**: Wenn `/discover #N` eine Session importiert deren `dirname-branch-shortid` Name schon von einer archivierten existiert, fällt's auf den Timestamp-Fallback (`...-1744223456`). Nicht ideal aber funktional. Lösung ergibt sich aus Punkt 9.
+11. **Matrix Message Queue / Rate-Limiting**: Während Phase 1 Testing beobachtet: wenn mehrere `/new` Commands schnell hintereinander kommen, sprengen wir das Synapse `rc_message` Burst-Limit (default 10). Die Session wird zwar korrekt erstellt, aber die Bestätigung im Control Room bleibt aus (wird gedroppt). Auch der Invite-Check Fix (Phase 1) löst nur `rc_invites`, nicht `rc_message`.
+    - **Was wir schon haben**: Crash-resistant — 429 Errors crashen den Supervisor nicht mehr (bot.ts:handleControlRoomMessage wraps error-send in try/catch).
+    - **Was fehlt**: Eine zentrale Outbound-Queue die Matrix-Sends throttelt (z.B. max 5/s). Pro Message: enqueue → worker zieht aus Queue mit Throttle → bei 429 respektiere `retry_after_ms` und retry. User sieht "Processing..." bei langen Delays.
+    - **Scope**: Eigener kleiner PR nach Phase 4. Nicht Teil des Auto-Handoff-Features, aber wichtig für robuste Multi-Session-Nutzung.
+12. **Resume von nie-genutzten Sessions stirbt**: Beobachtet in Phase 1 Testing: `/new name` erstellt eine Session und spawnt Claude. Wenn der User nie eine Message schickt und direkt ein Restart passiert, stirbt der `claude --resume <id>` Prozess wenige Sekunden nach dem Start (JSONL ist leer oder fast leer). Die Session mit echter Konversations-History resumed sauber.
+    - **Vermutung**: Claude Code hat eine Edge-Case wenn `--resume` auf einer effektiv leeren Session läuft. Kein Bug in unserem Code.
+    - **Impact**: Nur bei "schnellem Ausprobieren" relevant. In echter Nutzung schickt man immer mindestens eine Message bevor die Session sinnvoll ist.
+    - **Mögliche Lösungen** (TBD): (a) beim Restore checken ob JSONL leer ist und in dem Fall neue Session starten statt resume, (b) warten bis erste Message bevor wir in DB `status='active'` setzen, (c) beim Startup: leere Sessions auf `archived` setzen.
+    - **Scope**: Nicht Phase 1. Wenn es in echter Nutzung stört, Follow-Up PR.
 
 ## Research Findings
 
