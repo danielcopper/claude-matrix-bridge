@@ -528,6 +528,12 @@ Entscheidungen die wir während der Implementierung treffen:
 6. **Hook + Remote-Nutzung**: Wenn Supervisor auf Remote-Maschine läuft und User an anderem Rechner arbeitet — wie läuft der Hook? Aktuell nur sinnvoll wenn beide auf derselben Maschine. Nicht Scope für jetzt.
 7. **Fork-Sessions**: Wenn User lokal `--fork` macht → neue Session-ID → Supervisor kennt die nicht. Nur noch per `/discover` importierbar. Akzeptabel.
 8. **Permission-Requests während lokal**: Wenn local_active und Claude lokal ein Tool anfragen will, passiert das lokal im Terminal (nicht via Matrix). Bei Re-Attach sind die schon resolved in der JSONL. Kein Replay nötig für permissions.
+9. **Session-Name Wiederverwendung nach `/kill`**: Nach `/kill` ist die Session `archived`, aber der Name bleibt blockiert. Aktuell verhindert `parseNewArgs` jede Wiederverwendung mit `Session 'name' already exists`. UX-mäßig nervig — User erwartet dass ein gekillter Name wieder frei ist. Drei Lösungsansätze (TBD wann wir das fixen):
+   - **A) Hard-Delete beim Kill**: `/kill` löscht die Row aus der DB. Einfach, aber Room-Verbindung und History-Referenz verloren.
+   - **B) Rename beim Kill**: `/kill` hängt Timestamp an den Namen (`test-phase1-archived-1744223456`). Name wird frei, Historie bleibt nachvollziehbar.
+   - **C) Collision-Check ignoriert archived**: `parseNewArgs` filtert `status='archived'` aus dem Namens-Check. Erfordert aber Aufheben der UNIQUE Constraint auf `name` in der DB (oder gleichzeitigen hard-delete auf rename).
+   - **Tendenz**: Option B — wenig destruktiv, behält History, einfacher UNIQUE-Constraint bleibt. Nicht Scope für Phase 1, eigener kleiner PR.
+10. **Name-Collision beim `/discover`-Attach**: Wenn `/discover #N` eine Session importiert deren `dirname-branch-shortid` Name schon von einer archivierten existiert, fällt's auf den Timestamp-Fallback (`...-1744223456`). Nicht ideal aber funktional. Lösung ergibt sich aus Punkt 9.
 
 ## Research Findings
 
