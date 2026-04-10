@@ -10,7 +10,7 @@ import {
   releasePort,
 } from './database.js'
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
-import { ensureRelayRegistered, spawnClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
+import { checkRelayRegistered, spawnClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
 import { startApiServer } from './api.js'
 
@@ -73,8 +73,8 @@ for (const session of getLocalActiveSessions(db)) {
 
 logger.info({ path: config.database.path }, 'Database ready')
 
-// Ensure relay plugin is registered as user-scoped MCP server
-await ensureRelayRegistered(logger)
+// Verify relay plugin is registered (mise run dev / mise run setup does the registration)
+checkRelayRegistered(logger)
 
 const client = createBot(config, logger)
 await client.start()

@@ -1,12 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { Logger } from 'pino'
 import type Database from 'better-sqlite3'
 import type { Session } from './types.js'
 import { updateSession, expireSessionPermissions } from './database.js'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
 
 /**
  * Dedicated tmux socket for the bridge. Separates our sessions from the
@@ -30,10 +26,6 @@ export const activeSessions = new Set<string>()
 // Track session IDs spawned by the supervisor so the API can ignore
 // SessionStart hooks fired by our own spawns (replaces CMB_MANAGED env var).
 export const recentlySpawned = new Set<string>()
-
-export function relayPluginPath(): string {
-  return resolve(__dirname, '..', '..', 'matrix-relay')
-}
 
 function tmuxSessionName(session: Session): string {
   return `claude-${session.name}`
@@ -60,51 +52,30 @@ export function killTmuxServer(logger: Logger): void {
   }
 }
 
-export async function ensureRelayRegistered(logger: Logger): Promise<void> {
-  const pluginPath = relayPluginPath()
-
-  // Check if matrix-relay is already registered
+/**
+ * Verify that matrix-relay is registered as an MCP server. Does NOT register
+ * it — that's the job of `scripts/register-relay.sh` (via `mise run setup`
+ * or `mise run dev` which depends on `register-relay`).
+ *
+ * Throws if not registered, so the supervisor fails fast with a clear message.
+ */
+export function checkRelayRegistered(logger: Logger): void {
   try {
     const output = execFileSync('claude', ['mcp', 'list'], {
       encoding: 'utf-8',
       timeout: 10000,
     })
     if (output.includes('matrix-relay')) {
-      logger.debug('matrix-relay MCP server already registered')
+      logger.debug('matrix-relay MCP server registered')
       return
     }
   } catch {
-    // mcp list failed — try to register anyway
+    // mcp list failed — treat as not registered
   }
 
-  // Find bun binary via mise (bun is managed by mise, not in global PATH)
-  let bunPath: string
-  try {
-    bunPath = execFileSync('mise', ['which', 'bun'], {
-      encoding: 'utf-8',
-      cwd: pluginPath,
-      timeout: 10000,
-    }).trim()
-  } catch {
-    // Fallback: check global PATH
-    try {
-      bunPath = execFileSync('which', ['bun'], { encoding: 'utf-8' }).trim()
-    } catch {
-      throw new Error('Could not find bun binary. Run "mise install" in packages/matrix-relay/')
-    }
-  }
-
-  const serverConfig = JSON.stringify({
-    command: bunPath,
-    args: ['run', '--cwd', pluginPath, '--shell=bun', '--silent', 'start'],
-  })
-
-  logger.info('Registering matrix-relay MCP server (user scope)')
-  execFileSync('claude', ['mcp', 'add-json', '--scope', 'user', 'matrix-relay', serverConfig], {
-    encoding: 'utf-8',
-    timeout: 10000,
-  })
-  logger.info('matrix-relay MCP server registered')
+  throw new Error(
+    'matrix-relay MCP server is not registered. Run "mise run register-relay" or "mise run setup" first.',
+  )
 }
 
 export function spawnClaude(
