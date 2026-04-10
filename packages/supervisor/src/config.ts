@@ -17,6 +17,9 @@ export interface Config {
     start: number;
     end: number;
   };
+  replay: {
+    maxPairs: number;
+  };
   database: {
     path: string;
   };
@@ -53,6 +56,9 @@ export function loadConfig(): Config {
     ports: {
       start: Number(process.env.RELAY_PORT_START ?? 9000),
       end: Number(process.env.RELAY_PORT_END ?? 9015),
+    },
+    replay: {
+      maxPairs: Number(process.env.REPLAY_MAX_PAIRS ?? 20),
     },
     database: {
       path: process.env.DATABASE_PATH ?? "./data/bot.db",

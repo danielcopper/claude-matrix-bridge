@@ -23,6 +23,7 @@ import { sendPermission, sendMessage, waitForHealth, connectSSE } from './relay-
 import { spawnClaude } from './process-manager.js'
 import { handleCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
+import { buildReplay } from './replay.js'
 
 const SDK_LOG_LEVELS: Record<string, LogLevel> = {
   debug: LogLevel.DEBUG,
@@ -130,6 +131,54 @@ export async function bootstrapSpaceAndRooms(
   return { spaceId, controlRoomId }
 }
 
+// --- Permission Request Formatting ---
+
+function formatPermissionRequest(event: import('./types.js').PermissionRequestEvent): string {
+  const header = `**Permission Request** [${event.request_id}]`
+
+  let input: Record<string, unknown> | null = null
+  try {
+    input = JSON.parse(event.input_preview) as Record<string, unknown>
+  } catch {
+    // Not JSON — show as-is
+  }
+
+  if (!input) {
+    return [header, `Tool: \`${event.tool_name}\``, event.description, event.input_preview].join('\n')
+  }
+
+  const tool = event.tool_name
+
+  if (tool === 'Edit' && typeof input.file_path === 'string') {
+    const lines = [`${header}`, `**Edit** — \`${input.file_path}\``]
+    const oldStr = String(input.old_string ?? '')
+    const newStr = String(input.new_string ?? '')
+    if (oldStr || newStr) {
+      const diff: string[] = []
+      for (const l of oldStr.split('\n')) { if (l) diff.push(`- ${l}`) }
+      for (const l of newStr.split('\n')) { if (l) diff.push(`+ ${l}`) }
+      lines.push('```diff', ...diff, '```')
+    }
+    return lines.join('\n')
+  }
+
+  if (tool === 'Write' && typeof input.file_path === 'string') {
+    const content = String(input.content ?? '').slice(0, 500)
+    return [header, `**Write** — \`${input.file_path}\``, '```', content, '```'].join('\n')
+  }
+
+  if ((tool === 'Bash' || tool === 'bash') && typeof input.command === 'string') {
+    return [header, '**Bash**', '```bash', input.command, '```'].join('\n')
+  }
+
+  if (tool === 'Read' && typeof input.file_path === 'string') {
+    return [header, `**Read** — \`${input.file_path}\``].join('\n')
+  }
+
+  // Fallback: pretty-print JSON
+  return [header, `**${tool}**`, '```json', JSON.stringify(input, null, 2), '```'].join('\n')
+}
+
 // --- SSE Event Handler ---
 
 export function handleSSEEvent(
@@ -175,11 +224,7 @@ export function handleSSEEvent(
     case 'permission_request': {
       void (async () => {
         try {
-          const msg = [
-            `**Permission Request** [${event.request_id}]`,
-            `Tool: \`${event.tool_name}\``,
-            `${event.description}`,
-          ].join('\n')
+          const msg = formatPermissionRequest(event)
           const { body: plain, formatted_body } = formatMarkdown(msg)
           const eventId = await client.sendMessage(roomId, {
             msgtype: 'm.text',
@@ -398,10 +443,22 @@ async function autoAttachSession(
     logger,
   )
 
-  await client.sendText(
-    roomId,
-    wasLocal ? 'Local session closed, Matrix control resumed.' : 'Session re-attached.',
-  )
+  // Post replay of local activity before resuming Matrix conversation
+  if (wasLocal) {
+    const since = session.last_matrix_activity ? new Date(session.last_matrix_activity) : null
+    const replay = buildReplay(session.id, session.working_directory, since, config.replay.maxPairs)
+    if (replay) {
+      await client.sendMessage(roomId, {
+        msgtype: 'm.text',
+        body: replay.body,
+        format: 'org.matrix.custom.html',
+        formatted_body: replay.formatted_body,
+      })
+    }
+    await client.sendText(roomId, 'Local session closed, Matrix control resumed.')
+  } else {
+    await client.sendText(roomId, 'Session re-attached.')
+  }
 
   // Brief wait for Claude to fully initialize the channel after startup.
   // Health check only confirms the relay HTTP server is up — Claude needs
