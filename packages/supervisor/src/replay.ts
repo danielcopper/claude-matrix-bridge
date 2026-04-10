@@ -101,15 +101,17 @@ function formatReplayBlock(
   const dateStr = since.toISOString().replace('T', ' ').slice(0, 16)
 
   const header = totalPairs > maxPairs
-    ? `─── Local session activity (showing ${shownPairs} of ${totalPairs} exchanges, max ${maxPairs}) ───`
+    ? `─── Local session activity (${shownPairs} of ${totalPairs} exchanges) ───`
     : '─── Local session activity ───'
 
-  const lines = [header, `(from terminal, ${dateStr})`, '']
+  const lines = [header, '', `*(from terminal, ${dateStr})*`, '']
 
-  for (const msg of messages) {
-    const label = msg.role === 'user' ? '**User:**' : '**Claude:**'
-    lines.push(`${label} ${truncateText(msg.text, 500)}`)
-    if (msg.role === 'assistant') lines.push('')
+  for (let i = 0; i < messages.length; i += 2) {
+    const user = messages[i]
+    const assistant = messages[i + 1]
+    if (user) lines.push(`> **User:** ${truncateText(user.text, 500)}`)
+    if (assistant) lines.push(`> **Claude:** ${truncateText(assistant.text, 500)}`)
+    lines.push('')
   }
 
   lines.push('─── Back in Matrix ───')
