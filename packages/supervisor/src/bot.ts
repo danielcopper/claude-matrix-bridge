@@ -16,8 +16,11 @@ import {
   createPermissionRequest,
   getPermissionRequestByEventId,
   resolvePermissionRequest,
+  nextFreePort,
+  releasePort,
 } from './database.js'
-import { sendPermission, sendMessage } from './relay-client.js'
+import { sendPermission, sendMessage, waitForHealth, connectSSE } from './relay-client.js'
+import { spawnClaude } from './process-manager.js'
 import { handleCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 
@@ -155,7 +158,8 @@ export function handleSSEEvent(
               formatted_body,
             })
           }
-          updateSession(db, session.id, { last_message_at: new Date().toISOString() })
+          const now = new Date().toISOString()
+          updateSession(db, session.id, { last_message_at: now, last_matrix_activity: now })
         } catch (err) {
           logger.error({ err, session: session.name }, 'Failed to send reply to Matrix')
         }
@@ -310,6 +314,104 @@ function handleControlRoomMessage(
   logger.info({ body: body.slice(0, 100) }, 'Control room message (no routing yet)')
 }
 
+// --- Auto-Attach helpers ---
+
+// Prevents concurrent auto-attach attempts for the same session.
+const autoAttachInProgress = new Set<string>()
+
+async function killLocalClaude(pid: number, logger: Logger): Promise<void> {
+  try {
+    process.kill(pid, 'SIGTERM')
+    logger.info({ pid }, 'Sent SIGTERM to local claude')
+  } catch {
+    return // Already dead
+  }
+
+  // Wait for JSONL flush
+  await new Promise(r => setTimeout(r, 500))
+
+  // If still alive, escalate to SIGKILL
+  try {
+    process.kill(pid, 0)
+    process.kill(pid, 'SIGKILL')
+    logger.info({ pid }, 'Sent SIGKILL to local claude (still alive after SIGTERM)')
+  } catch {
+    // Dead after SIGTERM — good
+  }
+}
+
+async function autoAttachSession(
+  session: Session,
+  body: string,
+  sender: string,
+  client: MatrixClient,
+  db: Database.Database,
+  config: Config,
+  logger: Logger,
+): Promise<void> {
+  const roomId = session.room_id
+  if (!roomId) return
+
+  const wasLocal = session.status === 'local_active'
+
+  // Allocate a fresh port — the old port (if any) may be stale or reused.
+  const port = nextFreePort(db, config.ports.start, config.ports.end)
+  if (!port) {
+    await client.sendText(roomId, 'No free ports available. Cannot re-attach session.')
+    return
+  }
+
+  // Set 'spawning' BEFORE killing local claude. This serves two purposes:
+  // 1. The SessionEnd hook (from the dying local process) sees status != 'local_active' → skips
+  // 2. The SessionStart hook (from our own spawn) sees status == 'spawning' → ignored
+  updateSession(db, session.id, { status: 'spawning', port, local_pid: null })
+  releasePort(port)
+
+  if (wasLocal && session.local_pid) {
+    await killLocalClaude(session.local_pid, logger)
+  }
+
+  const updated: Session = { ...session, status: 'spawning', port, local_pid: null }
+
+  spawnClaude(updated, config, db, logger, {
+    resume: true,
+    onExit: () => {
+      void client
+        .sendHtmlText(roomId, '<strong>Claude session ended.</strong>')
+        .catch(() => {})
+    },
+  })
+
+  const healthy = await waitForHealth(port, logger, 30000)
+  if (!healthy) {
+    updateSession(db, session.id, { status: 'detached', port: null })
+    await client.sendText(roomId, 'Failed to start session. Send a message to retry.')
+    return
+  }
+
+  updateSession(db, session.id, { status: 'active' })
+
+  connectSSE(
+    port,
+    (event) => handleSSEEvent(event, { ...updated, status: 'active' }, client, db, logger),
+    (err) => logger.error({ err, session: session.name }, 'SSE connection error'),
+    logger,
+  )
+
+  await client.sendText(
+    roomId,
+    wasLocal ? 'Local session closed, Matrix control resumed.' : 'Session re-attached.',
+  )
+
+  // Brief wait for Claude to fully initialize the channel after startup.
+  // Health check only confirms the relay HTTP server is up — Claude needs
+  // a moment longer to wire up the channel protocol after resume.
+  await new Promise(r => setTimeout(r, 2000))
+
+  await client.setTyping(roomId, true, 30000)
+  await sendMessage(port, sender, body)
+}
+
 // --- Session room message handler ---
 
 function handleSessionRoomMessage(
@@ -319,27 +421,39 @@ function handleSessionRoomMessage(
   roomId: string,
   client: MatrixClient,
   db: Database.Database,
+  config: Config,
   logger: Logger,
 ): void {
   if (tryTextPermissionVerdict(body, session, db, client, roomId, logger)) return
 
-  if (session.status === 'detached') {
-    void client.sendText(roomId, `Session detached. Use \`/attach ${session.name}\` in control room.`)
-    return
-  }
   if (session.status === 'archived') {
     void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
     return
   }
-  if (session.status === 'local_active') {
-    // Phase 3 will implement auto-attach (kill local PID + resume + reply).
-    // For Phase 2, just inform the user that the session is locked to the terminal.
-    void client.sendText(
-      roomId,
-      `Session is currently active in a local terminal (PID ${session.local_pid ?? '?'}). Exit the local claude first or wait for Phase 3 auto-attach.`,
-    )
+  if (session.status === 'spawning') {
+    void client.sendText(roomId, 'Session is starting up, please wait...')
     return
   }
+
+  if (session.status === 'local_active' || session.status === 'detached') {
+    if (autoAttachInProgress.has(session.id)) {
+      void client.sendText(roomId, 'Re-attaching session, please wait...')
+      return
+    }
+    autoAttachInProgress.add(session.id)
+    void (async () => {
+      try {
+        await autoAttachSession(session, body, sender, client, db, config, logger)
+      } catch (err) {
+        logger.error({ err, session: session.name }, 'Auto-attach failed')
+        await client.sendText(roomId, `Auto-attach failed: ${err instanceof Error ? err.message : err}`)
+      } finally {
+        autoAttachInProgress.delete(session.id)
+      }
+    })()
+    return
+  }
+
   const port = session.port
   if (!port) {
     void client.sendText(roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`)
@@ -396,7 +510,7 @@ export function setupEventHandlers(
     const session = getSessionByRoomId(db, roomId)
     if (!session) return
 
-    handleSessionRoomMessage(body, sender, session, roomId, client, db, logger)
+    handleSessionRoomMessage(body, sender, session, roomId, client, db, config, logger)
   })
 
   // Reaction handler for permission verdicts

@@ -4,7 +4,7 @@ import type { MatrixClient } from 'matrix-bot-sdk'
 import type { Logger } from 'pino'
 import type { Config } from './config.js'
 import { getSessionById, updateSession } from './database.js'
-import { recentlySpawned, killClaude } from './process-manager.js'
+import { killClaude } from './process-manager.js'
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -88,10 +88,11 @@ async function handleSessionStart(
     return
   }
 
-  // Ignore hooks fired by our own spawns (replaces CMB_MANAGED env var)
-  if (recentlySpawned.delete(sessionId)) {
-    logger.debug({ session: session.name }, 'Ignoring SessionStart from supervisor spawn')
-    json(res, 200, { status: session.status, action: 'ignored' })
+  // Supervisor is currently spawning this session — the hook is from our own
+  // spawn, not a local terminal. Ignore it.
+  if (session.status === 'spawning') {
+    logger.debug({ session: session.name }, 'Ignoring SessionStart from supervisor spawn (status=spawning)')
+    json(res, 200, { status: 'spawning', action: 'ignored' })
     return
   }
 
@@ -121,7 +122,7 @@ async function handleSessionStart(
       logger.warn({ err, session: session.name }, 'killClaude failed during auto-detach')
     }
   } else {
-    // Detached/handed_off: no claude to kill, just transition state.
+    // Detached: no claude to kill, just transition state.
     logger.info({ session: session.name, localPid }, 'Session claimed by local terminal')
   }
 
