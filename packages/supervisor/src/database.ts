@@ -35,7 +35,7 @@ export function runMigrations(db: Database.Database): void {
   const migrationsDir = resolve(__dirname, '..', 'migrations')
   const files = readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.sql'))
-    .sort()
+    .sort((a, b) => a.localeCompare(b))
 
   const insertApplied = db.prepare(
     'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
