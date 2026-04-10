@@ -361,17 +361,17 @@ async function autoAttachSession(
     return
   }
 
-  // Transition to 'active' BEFORE killing local claude. The dying process
-  // fires a SessionEnd hook — with status already 'active', handleSessionEnd
-  // skips its handling (no redundant "Local session ended" message).
-  updateSession(db, session.id, { status: 'active', port, local_pid: null })
+  // Set 'spawning' BEFORE killing local claude. This serves two purposes:
+  // 1. The SessionEnd hook (from the dying local process) sees status != 'local_active' → skips
+  // 2. The SessionStart hook (from our own spawn) sees status == 'spawning' → ignored
+  updateSession(db, session.id, { status: 'spawning', port, local_pid: null })
   releasePort(port)
 
   if (wasLocal && session.local_pid) {
     await killLocalClaude(session.local_pid, logger)
   }
 
-  const updated: Session = { ...session, status: 'active', port, local_pid: null }
+  const updated: Session = { ...session, status: 'spawning', port, local_pid: null }
 
   spawnClaude(updated, config, db, logger, {
     resume: true,
@@ -384,13 +384,16 @@ async function autoAttachSession(
 
   const healthy = await waitForHealth(port, logger, 30000)
   if (!healthy) {
-    await client.sendText(roomId, `Session re-attached but relay not responding on port ${port}.`)
+    updateSession(db, session.id, { status: 'detached', port: null })
+    await client.sendText(roomId, 'Failed to start session. Send a message to retry.')
     return
   }
 
+  updateSession(db, session.id, { status: 'active' })
+
   connectSSE(
     port,
-    (event) => handleSSEEvent(event, updated, client, db, logger),
+    (event) => handleSSEEvent(event, { ...updated, status: 'active' }, client, db, logger),
     (err) => logger.error({ err, session: session.name }, 'SSE connection error'),
     logger,
   )
@@ -425,6 +428,10 @@ function handleSessionRoomMessage(
 
   if (session.status === 'archived') {
     void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
+    return
+  }
+  if (session.status === 'spawning') {
+    void client.sendText(roomId, 'Session is starting up, please wait...')
     return
   }
 

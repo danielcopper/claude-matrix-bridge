@@ -23,10 +23,6 @@ function tmuxArgs(...args: string[]): string[] {
 // Track active tmux session names for cleanup
 export const activeSessions = new Set<string>()
 
-// Track session IDs spawned by the supervisor so the API can ignore
-// SessionStart hooks fired by our own spawns (replaces CMB_MANAGED env var).
-export const recentlySpawned = new Set<string>()
-
 function tmuxSessionName(session: Session): string {
   return `claude-${session.name}`
 }
@@ -112,13 +108,6 @@ export function spawnClaude(
   // RELAY_PORT is set as env var prefix so the channel plugin picks it up
   const quotedArgs = claudeArgs.map(quoteArg).join(' ')
   const claudeCmd = `RELAY_PORT=${session.port} claude ${quotedArgs}`
-
-  // Mark as supervisor-spawned so the API ignores the SessionStart hook.
-  // Only needed for resume — the hook's "resume" matcher won't fire for
-  // new sessions (which use --session-id, not --resume).
-  if (options?.resume) {
-    recentlySpawned.add(session.id)
-  }
 
   sessionLogger.info({ cwd: session.working_directory, claudeCmd }, 'Spawning Claude in tmux')
 
@@ -263,7 +252,6 @@ export async function killClaude(
   }
 
   activeSessions.delete(session.id)
-  recentlySpawned.delete(session.id)
 }
 
 export async function killAllProcesses(logger: Logger): Promise<void> {
@@ -278,5 +266,4 @@ export async function killAllProcesses(logger: Logger): Promise<void> {
   killTmuxServer(logger)
 
   activeSessions.clear()
-  recentlySpawned.clear()
 }

@@ -3,16 +3,16 @@
 /**
  * Session lifecycle states. See docs/AUTO_HANDOFF.md for the state machine.
  *
+ * - spawning     : supervisor is starting claude (tmux + health check in progress)
  * - active       : supervisor holds the claude session via tmux
  * - local_active : a local terminal holds the claude session (supervisor passive)
  * - detached     : no claude process, session idle, ready to attach
- * - archived    : killed, kept for history but not restorable
- * - handed_off  : legacy state from earlier design; migrated to detached on startup
+ * - archived     : killed, kept for history but not restorable
  */
 export type SessionStatus =
+  | 'spawning'
   | 'active'
   | 'local_active'
-  | 'handed_off'
   | 'detached'
   | 'archived'
 

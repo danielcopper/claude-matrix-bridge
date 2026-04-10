@@ -296,11 +296,10 @@ async function resumeSession(
     reservedHere = true;
   }
 
-  // Update session — port now in DB, reservation can be released
-  updateSession(db, session.id, { status: "active", port });
+  // Mark spawning — our own SessionStart hook will see this and skip.
+  updateSession(db, session.id, { status: "spawning", port });
   if (reservedHere) releasePort(port);
-  // Re-read to get updated fields
-  const updated: Session = { ...session, status: "active", port };
+  const updated: Session = { ...session, status: "spawning", port };
 
   // Spawn with --resume
   spawnClaude(updated, config, db, logger, {
@@ -319,12 +318,15 @@ async function resumeSession(
 
   const healthy = await waitForHealth(port, logger, 30000);
   if (!healthy) {
-    return `Session \`${session.name}\` re-attached but relay not responding on port ${port}.`;
+    updateSession(db, session.id, { status: "detached", port: null });
+    return `Session \`${session.name}\` failed to start. Use /attach to retry.`;
   }
+
+  updateSession(db, session.id, { status: "active" });
 
   connectSSE(
     port,
-    (event) => handleSSEEvent(event, updated, client, db, logger),
+    (event) => handleSSEEvent(event, { ...updated, status: "active" }, client, db, logger),
     (err) => logger.error({ err, session: session.name }, "SSE connection error"),
     logger,
   );
@@ -526,7 +528,7 @@ async function handleNew(
       permission_mode: "default",
       port,
       pid: null,
-      status: "active",
+      status: "spawning",
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       last_message_at: null,
@@ -545,12 +547,16 @@ async function handleNew(
 
     const healthy = await waitForHealth(port, logger, 30000);
     if (!healthy) {
-      return `Session \`${name}\` created but relay not responding on port ${port}. Claude may still be starting.`;
+      updateSession(db, session.id, { status: "detached", port: null });
+      return `Session \`${name}\` created but failed to start. Use /attach to retry.`;
     }
+
+    updateSession(db, session.id, { status: "active" });
+    const active: Session = { ...session, status: "active" };
 
     connectSSE(
       port,
-      (event) => handleSSEEvent(event, session, client, db, logger),
+      (event) => handleSSEEvent(event, active, client, db, logger),
       (err) => logger.error({ err, session: name }, "SSE connection error"),
       logger,
     );
