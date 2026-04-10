@@ -15,6 +15,8 @@ interface JsonlRecord {
 interface ContentBlock {
   type: string
   text?: string
+  name?: string
+  input?: Record<string, unknown>
 }
 
 interface ReplayMessage {
@@ -86,16 +88,28 @@ function isAssistantText(r: JsonlRecord): boolean {
   return false
 }
 
-function extractToolNames(r: JsonlRecord): string[] {
+function toolSummary(b: ContentBlock): string | null {
+  if (b.type !== 'tool_use' || !b.name) return null
+  if (b.name.startsWith('mcp__matrix-relay__')) return null
+
+  const name = b.name
+  const filePath = typeof b.input?.file_path === 'string'
+    ? b.input.file_path.replace(/^.*\//, '') // basename
+    : null
+
+  if (filePath) return `${name}: ${filePath}`
+  if (name === 'Bash' && typeof b.input?.command === 'string') {
+    const cmd = b.input.command.slice(0, 40)
+    return `Bash: ${cmd}${b.input.command.length > 40 ? '…' : ''}`
+  }
+  return name
+}
+
+function extractToolSummaries(r: JsonlRecord): string[] {
   if (r.type !== 'assistant') return []
   const content = r.message?.content
   if (!Array.isArray(content)) return []
-  return content
-    .filter((b: ContentBlock) => b.type === 'tool_use')
-    .map((b) => (b as ContentBlock & { name?: string }).name)
-    .filter((n): n is string => !!n)
-    // Strip mcp__matrix-relay__ prefix — those are internal relay tools
-    .filter((n) => !n.startsWith('mcp__matrix-relay__'))
+  return content.map(toolSummary).filter((s): s is string => !!s)
 }
 
 function escapeHtml(s: string): string {
@@ -128,7 +142,7 @@ function formatReplayBlock(
   maxPairs: number,
   since: Date,
 ): ReplayBlock {
-  const dateStr = since.toISOString().replace('T', ' ').slice(0, 16)
+  const dateStr = since.toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' })
 
   const header = totalPairs > maxPairs
     ? `─── Local session activity (${pairs.length} of ${totalPairs} exchanges) ───`
@@ -184,7 +198,7 @@ export function buildReplay(
         pendingTools = []
       }
     } else if (r.type === 'assistant' && pendingUser) {
-      pendingTools.push(...extractToolNames(r))
+      pendingTools.push(...extractToolSummaries(r))
       if (isAssistantText(r)) {
         const text = extractText(r.message?.content)
         if (text) {

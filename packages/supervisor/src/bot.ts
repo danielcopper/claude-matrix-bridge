@@ -131,6 +131,54 @@ export async function bootstrapSpaceAndRooms(
   return { spaceId, controlRoomId }
 }
 
+// --- Permission Request Formatting ---
+
+function formatPermissionRequest(event: import('./types.js').PermissionRequestEvent): string {
+  const header = `**Permission Request** [${event.request_id}]`
+
+  let input: Record<string, unknown> | null = null
+  try {
+    input = JSON.parse(event.input_preview) as Record<string, unknown>
+  } catch {
+    // Not JSON — show as-is
+  }
+
+  if (!input) {
+    return [header, `Tool: \`${event.tool_name}\``, event.description, event.input_preview].join('\n')
+  }
+
+  const tool = event.tool_name
+
+  if (tool === 'Edit' && typeof input.file_path === 'string') {
+    const lines = [`${header}`, `**Edit** — \`${input.file_path}\``]
+    const oldStr = String(input.old_string ?? '')
+    const newStr = String(input.new_string ?? '')
+    if (oldStr || newStr) {
+      const diff: string[] = []
+      for (const l of oldStr.split('\n')) { if (l) diff.push(`- ${l}`) }
+      for (const l of newStr.split('\n')) { if (l) diff.push(`+ ${l}`) }
+      lines.push('```diff', ...diff, '```')
+    }
+    return lines.join('\n')
+  }
+
+  if (tool === 'Write' && typeof input.file_path === 'string') {
+    const content = String(input.content ?? '').slice(0, 500)
+    return [header, `**Write** — \`${input.file_path}\``, '```', content, '```'].join('\n')
+  }
+
+  if ((tool === 'Bash' || tool === 'bash') && typeof input.command === 'string') {
+    return [header, '**Bash**', '```bash', input.command, '```'].join('\n')
+  }
+
+  if (tool === 'Read' && typeof input.file_path === 'string') {
+    return [header, `**Read** — \`${input.file_path}\``].join('\n')
+  }
+
+  // Fallback: pretty-print JSON
+  return [header, `**${tool}**`, '```json', JSON.stringify(input, null, 2), '```'].join('\n')
+}
+
 // --- SSE Event Handler ---
 
 export function handleSSEEvent(
@@ -176,15 +224,7 @@ export function handleSSEEvent(
     case 'permission_request': {
       void (async () => {
         try {
-          const parts = [
-            `**Permission Request** [${event.request_id}]`,
-            `Tool: \`${event.tool_name}\``,
-            `${event.description}`,
-          ]
-          if (event.input_preview) {
-            parts.push(`\`\`\`\n${event.input_preview}\n\`\`\``)
-          }
-          const msg = parts.join('\n')
+          const msg = formatPermissionRequest(event)
           const { body: plain, formatted_body } = formatMarkdown(msg)
           const eventId = await client.sendMessage(roomId, {
             msgtype: 'm.text',
