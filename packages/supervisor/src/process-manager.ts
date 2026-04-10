@@ -113,8 +113,12 @@ export function spawnClaude(
   const quotedArgs = claudeArgs.map(quoteArg).join(' ')
   const claudeCmd = `RELAY_PORT=${session.port} claude ${quotedArgs}`
 
-  // Mark as supervisor-spawned so the API ignores the SessionStart hook
-  recentlySpawned.add(session.id)
+  // Mark as supervisor-spawned so the API ignores the SessionStart hook.
+  // Only needed for resume — the hook's "resume" matcher won't fire for
+  // new sessions (which use --session-id, not --resume).
+  if (options?.resume) {
+    recentlySpawned.add(session.id)
+  }
 
   sessionLogger.info({ cwd: session.working_directory, claudeCmd }, 'Spawning Claude in tmux')
 
