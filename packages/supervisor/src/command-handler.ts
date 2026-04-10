@@ -137,12 +137,13 @@ function handleList(db: Database.Database): string {
 
   const rows = sessions.map((s) => {
     const dir = s.working_directory.replace(homedir(), "~");
-    return `| ${s.name} | ${dir} | ${s.port ?? "-"} | ${s.status} | ${timeAgo(s.last_message_at)} |`;
+    const shortId = s.id.slice(0, 8);
+    return `| ${s.name} | ${shortId} | ${dir} | ${s.status} | ${timeAgo(s.last_message_at)} |`;
   });
 
   return [
-    "| Name | Directory | Port | Status | Last activity |",
-    "|------|-----------|------|--------|---------------|",
+    "| Name | ID | Directory | Status | Last activity |",
+    "|------|----|-----------|--------|---------------|",
     ...rows,
   ].join("\n");
 }

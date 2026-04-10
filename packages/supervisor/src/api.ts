@@ -167,6 +167,19 @@ async function handleSessionEnd(
     return
   }
 
+  // When we auto-detach (kill supervisor's tmux claude), that dying process
+  // also fires a SessionEnd hook. Ignore it — only act on the LOCAL claude's exit.
+  // Match by PID: if we stored local_pid and the hook sends a different pid, skip.
+  const hookPid = typeof body.pid === 'number' ? body.pid : null
+  if (session.local_pid && hookPid && hookPid !== session.local_pid) {
+    logger.debug(
+      { session: session.name, hookPid, localPid: session.local_pid },
+      'Ignoring SessionEnd from killed supervisor claude (not the local process)',
+    )
+    json(res, 200, { status: session.status, action: 'ignored' })
+    return
+  }
+
   logger.info({ session: session.name }, 'Local session ended, session now idle')
   updateSession(db, session.id, { status: 'detached', local_pid: null })
 
