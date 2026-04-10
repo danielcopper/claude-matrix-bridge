@@ -18,6 +18,7 @@ import {
   getConfig,
   expireSessionPermissions,
   nextFreePort,
+  releasePort,
 } from "./database.js";
 import { spawnClaude, killClaude } from "./process-manager.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
@@ -136,12 +137,13 @@ function handleList(db: Database.Database): string {
 
   const rows = sessions.map((s) => {
     const dir = s.working_directory.replace(homedir(), "~");
-    return `| ${s.name} | ${dir} | ${s.port ?? "-"} | ${s.status} | ${timeAgo(s.last_message_at)} |`;
+    const shortId = s.id.slice(0, 8);
+    return `| ${s.name} | ${shortId} | ${dir} | ${s.status} | ${timeAgo(s.last_message_at)} |`;
   });
 
   return [
-    "| Name | Directory | Port | Status | Last activity |",
-    "|------|-----------|------|--------|---------------|",
+    "| Name | ID | Directory | Status | Last activity |",
+    "|------|----|-----------|--------|---------------|",
     ...rows,
   ].join("\n");
 }
@@ -239,36 +241,42 @@ async function attachDiscovered(
   const port = nextFreePort(db, config.ports.start, config.ports.end);
   if (port == null) return "No free ports available.";
 
-  const name = discoveredName(discovered, db);
-  const domain = config.matrix.botUserId.split(":")[1];
-  const spaceId = getConfig(db, "space_id");
+  try {
+    const name = discoveredName(discovered, db);
+    const domain = config.matrix.botUserId.split(":")[1];
+    const spaceId = getConfig(db, "space_id");
 
-  const roomId = await client.createRoom({
-    name,
-    topic: `Claude session — ${discovered.cwd}`,
-    preset: "private_chat",
-    invite: [config.matrix.ownerUserId],
-  });
+    const roomId = await client.createRoom({
+      name,
+      topic: `Claude session — ${discovered.cwd}`,
+      preset: "private_chat",
+      invite: [config.matrix.ownerUserId],
+    });
 
-  await addRoomToSpace(client, spaceId, roomId, domain, logger);
+    await addRoomToSpace(client, spaceId, roomId, domain, logger);
 
-  const session: Session = {
-    id: discovered.id,
-    room_id: roomId,
-    name,
-    working_directory: discovered.cwd,
-    model: config.claude.model,
-    permission_mode: "default",
-    port,
-    pid: null,
-    status: "active",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    last_message_at: null,
-  };
-  createSession(db, session);
+    const session: Session = {
+      id: discovered.id,
+      room_id: roomId,
+      name,
+      working_directory: discovered.cwd,
+      model: config.claude.model,
+      permission_mode: "default",
+      port,
+      pid: null,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      last_message_at: null,
+      local_pid: null,
+      last_matrix_activity: null,
+    };
+    createSession(db, session);
 
-  return resumeSession(session, client, db, config, logger);
+    return await resumeSession(session, client, db, config, logger);
+  } finally {
+    releasePort(port);
+  }
 }
 
 async function resumeSession(
@@ -280,13 +288,17 @@ async function resumeSession(
 ): Promise<string> {
   // Allocate port if needed (archived sessions have port = null)
   let port = session.port;
+  let reservedHere = false;
   if (!port) {
-    port = nextFreePort(db, config.ports.start, config.ports.end);
-    if (!port) return "No free ports available.";
+    const allocated = nextFreePort(db, config.ports.start, config.ports.end);
+    if (!allocated) return "No free ports available.";
+    port = allocated;
+    reservedHere = true;
   }
 
-  // Update session
+  // Update session — port now in DB, reservation can be released
   updateSession(db, session.id, { status: "active", port });
+  if (reservedHere) releasePort(port);
   // Re-read to get updated fields
   const updated: Session = { ...session, status: "active", port };
 
@@ -491,59 +503,66 @@ async function handleNew(
     return `No free ports available (${config.ports.start}-${config.ports.end}). Kill some sessions first.`;
   }
 
-  const domain = config.matrix.botUserId.split(":")[1];
-  const spaceId = getConfig(db, "space_id");
+  try {
+    const domain = config.matrix.botUserId.split(":")[1];
+    const spaceId = getConfig(db, "space_id");
 
-  logger.info({ name, workDir, port }, "Creating session");
-  const roomId = await client.createRoom({
-    name,
-    topic: `Claude session — ${workDir}`,
-    preset: "private_chat",
-    invite: [config.matrix.ownerUserId],
-  });
+    logger.info({ name, workDir, port }, "Creating session");
+    const roomId = await client.createRoom({
+      name,
+      topic: `Claude session — ${workDir}`,
+      preset: "private_chat",
+      invite: [config.matrix.ownerUserId],
+    });
 
-  await addRoomToSpace(client, spaceId, roomId, domain, logger);
+    await addRoomToSpace(client, spaceId, roomId, domain, logger);
 
-  const session: Session = {
-    id: randomUUID(),
-    room_id: roomId,
-    name,
-    working_directory: workDir,
-    model: config.claude.model,
-    permission_mode: "default",
-    port,
-    pid: null,
-    status: "active",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    last_message_at: null,
-  };
-  createSession(db, session);
+    const session: Session = {
+      id: randomUUID(),
+      room_id: roomId,
+      name,
+      working_directory: workDir,
+      model: config.claude.model,
+      permission_mode: "default",
+      port,
+      pid: null,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      last_message_at: null,
+      local_pid: null,
+      last_matrix_activity: null,
+    };
+    createSession(db, session);
 
-  spawnClaude(session, config, db, logger, {
-    onExit: () => {
-      void client
-        .sendHtmlText(roomId, "<strong>Claude session ended.</strong>")
-        .catch(() => {});
-    },
-  });
+    spawnClaude(session, config, db, logger, {
+      onExit: () => {
+        void client
+          .sendHtmlText(roomId, "<strong>Claude session ended.</strong>")
+          .catch(() => {});
+      },
+    });
 
-  const healthy = await waitForHealth(port, logger, 30000);
-  if (!healthy) {
-    return `Session \`${name}\` created but relay not responding on port ${port}. Claude may still be starting.`;
+    const healthy = await waitForHealth(port, logger, 30000);
+    if (!healthy) {
+      return `Session \`${name}\` created but relay not responding on port ${port}. Claude may still be starting.`;
+    }
+
+    connectSSE(
+      port,
+      (event) => handleSSEEvent(event, session, client, db, logger),
+      (err) => logger.error({ err, session: name }, "SSE connection error"),
+      logger,
+    );
+
+    await client.sendHtmlText(
+      roomId,
+      `<strong>Session started.</strong> Working directory: <code>${workDir}</code>`,
+    );
+
+    return `Session **${name}** created → [${name}](https://matrix.to/#/${roomId})`;
+  } finally {
+    // Port is now in DB (or session creation failed); release the reservation.
+    releasePort(port);
   }
-
-  connectSSE(
-    port,
-    (event) => handleSSEEvent(event, session, client, db, logger),
-    (err) => logger.error({ err, session: name }, "SSE connection error"),
-    logger,
-  );
-
-  await client.sendHtmlText(
-    roomId,
-    `<strong>Session started.</strong> Working directory: <code>${workDir}</code>`,
-  );
-
-  return `Session **${name}** created → [${name}](https://matrix.to/#/${roomId})`;
 }

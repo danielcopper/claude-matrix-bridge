@@ -1,6 +1,21 @@
 // --- Session ---
 
-export type SessionStatus = 'active' | 'handed_off' | 'detached' | 'archived'
+/**
+ * Session lifecycle states. See docs/AUTO_HANDOFF.md for the state machine.
+ *
+ * - active       : supervisor holds the claude session via tmux
+ * - local_active : a local terminal holds the claude session (supervisor passive)
+ * - detached     : no claude process, session idle, ready to attach
+ * - archived    : killed, kept for history but not restorable
+ * - handed_off  : legacy state from earlier design; migrated to detached on startup
+ */
+export type SessionStatus =
+  | 'active'
+  | 'local_active'
+  | 'handed_off'
+  | 'detached'
+  | 'archived'
+
 export type PermissionMode = 'default' | 'plan' | 'bypassPermissions'
 
 export interface Session {
@@ -16,6 +31,10 @@ export interface Session {
   created_at: string
   updated_at: string
   last_message_at: string | null
+  /** PID of the local claude process when status === 'local_active'. */
+  local_pid: number | null
+  /** ISO timestamp of the last message Matrix has posted or received. */
+  last_matrix_activity: string | null
 }
 
 // --- Permission ---

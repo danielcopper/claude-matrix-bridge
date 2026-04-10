@@ -17,6 +17,7 @@ run = "cd packages/supervisor && npx tsc"
 
 [tasks.dev]
 description = "Start supervisor in dev mode"
+depends = ["register-relay"]
 run = "cd packages/supervisor && npx tsx src/index.ts"
 
 [tasks.typecheck]

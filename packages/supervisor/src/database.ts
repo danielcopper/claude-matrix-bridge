@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
-import { readFileSync, mkdirSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { readFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { dirname, resolve, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Session, PermissionRequest, PermissionStatus } from './types.js'
 
@@ -16,10 +16,39 @@ export function openDatabase(path: string): Database.Database {
   return db
 }
 
+/**
+ * Apply all *.sql files in migrations/ that haven't run yet.
+ * Tracks applied migrations in a schema_migrations table for idempotency.
+ */
 export function runMigrations(db: Database.Database): void {
-  const migrationPath = resolve(__dirname, '..', 'migrations', '001_init.sql')
-  const sql = readFileSync(migrationPath, 'utf-8')
-  db.exec(sql)
+  const createTrackingTable = `CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`
+  db.exec(createTrackingTable)
+
+  const applied = new Set(
+    (db.prepare('SELECT name FROM schema_migrations').all() as { name: string }[])
+      .map((r) => r.name),
+  )
+
+  const migrationsDir = resolve(__dirname, '..', 'migrations')
+  const files = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort((a, b) => a.localeCompare(b))
+
+  const insertApplied = db.prepare(
+    'INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)',
+  )
+
+  for (const file of files) {
+    if (applied.has(file)) continue
+    const sql = readFileSync(join(migrationsDir, file), 'utf-8')
+    db.transaction(() => {
+      db.exec(sql)
+      insertApplied.run(file, new Date().toISOString())
+    })()
+  }
 }
 
 // --- Config helpers ---
@@ -70,6 +99,14 @@ export function getActiveSessions(db: Database.Database): Session[] {
   return db.prepare("SELECT * FROM sessions WHERE status = 'active'").all() as Session[]
 }
 
+/**
+ * Ports reserved between nextFreePort and the actual DB commit. Prevents a
+ * race where two concurrent /new handlers allocate the same port because
+ * neither has written its session to the DB yet. Caller must releasePort
+ * after createSession commits (or on any error path).
+ */
+const reservedPorts = new Set<number>()
+
 export function nextFreePort(
   db: Database.Database,
   portStart: number,
@@ -81,16 +118,36 @@ export function nextFreePort(
       .map((s) => s.port),
   )
   for (let port = portStart; port <= portEnd; port++) {
-    if (!usedPorts.has(port)) return port
+    if (!usedPorts.has(port) && !reservedPorts.has(port)) {
+      reservedPorts.add(port)
+      return port
+    }
   }
   return null
 }
 
+export function releasePort(port: number): void {
+  reservedPorts.delete(port)
+}
+
 export function createSession(db: Database.Database, session: Session): void {
   db.prepare(
-    `INSERT INTO sessions (id, room_id, name, working_directory, model, permission_mode, port, pid, status, created_at, updated_at, last_message_at)
-     VALUES (@id, @room_id, @name, @working_directory, @model, @permission_mode, @port, @pid, @status, @created_at, @updated_at, @last_message_at)`,
+    `INSERT INTO sessions (
+       id, room_id, name, working_directory, model, permission_mode,
+       port, pid, status, created_at, updated_at, last_message_at,
+       local_pid, last_matrix_activity
+     ) VALUES (
+       @id, @room_id, @name, @working_directory, @model, @permission_mode,
+       @port, @pid, @status, @created_at, @updated_at, @last_message_at,
+       @local_pid, @last_matrix_activity
+     )`,
   ).run(session)
+}
+
+export function getLocalActiveSessions(db: Database.Database): Session[] {
+  return db
+    .prepare("SELECT * FROM sessions WHERE status = 'local_active'")
+    .all() as Session[]
 }
 
 export function updateSession(
