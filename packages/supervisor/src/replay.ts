@@ -110,7 +110,7 @@ function formatReplayBlock(
     const user = messages[i]
     const assistant = messages[i + 1]
     if (user) lines.push(`> **User:** ${truncateText(user.text, 500)}`)
-    if (assistant) lines.push(`> **Claude:** ${truncateText(assistant.text, 500)}`)
+    if (assistant) lines.push(`> *Claude:* ${truncateText(assistant.text, 500)}`)
     lines.push('')
   }
 
