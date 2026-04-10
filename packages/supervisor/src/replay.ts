@@ -86,6 +86,18 @@ function isAssistantText(r: JsonlRecord): boolean {
   return false
 }
 
+function extractToolNames(r: JsonlRecord): string[] {
+  if (r.type !== 'assistant') return []
+  const content = r.message?.content
+  if (!Array.isArray(content)) return []
+  return content
+    .filter((b: ContentBlock) => b.type === 'tool_use')
+    .map((b) => (b as ContentBlock & { name?: string }).name)
+    .filter((n): n is string => !!n)
+    // Strip mcp__matrix-relay__ prefix — those are internal relay tools
+    .filter((n) => !n.startsWith('mcp__matrix-relay__'))
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
@@ -100,8 +112,18 @@ export interface ReplayBlock {
   formatted_body: string
 }
 
+function formatToolTag(tools: string[]): string {
+  if (tools.length === 0) return ''
+  return `[${tools.join(', ')}] `
+}
+
+function formatToolTagHtml(tools: string[]): string {
+  if (tools.length === 0) return ''
+  return `<code>${escapeHtml(tools.join(', '))}</code> `
+}
+
 function formatReplayBlock(
-  pairs: { user: string; assistant: string }[],
+  pairs: { user: string; assistant: string; tools: string[] }[],
   totalPairs: number,
   maxPairs: number,
   since: Date,
@@ -116,7 +138,7 @@ function formatReplayBlock(
   const plain: string[] = [header, `(from terminal, ${dateStr})`, '']
   for (const p of pairs) {
     plain.push(`User: ${truncateText(p.user, 500)}`)
-    plain.push(`Claude: ${truncateText(p.assistant, 500)}`)
+    plain.push(`Claude: ${formatToolTag(p.tools)}${truncateText(p.assistant, 500)}`)
     plain.push('')
   }
   plain.push('─── Back in Matrix ───')
@@ -128,7 +150,7 @@ function formatReplayBlock(
   for (const p of pairs) {
     html.push(
       `<blockquote><b>User:</b> ${escapeHtml(truncateText(p.user, 500))}<br>`
-      + `<i>Claude:</i> ${escapeHtml(truncateText(p.assistant, 500))}</blockquote>`,
+      + `<i>Claude:</i> ${formatToolTagHtml(p.tools)}${escapeHtml(truncateText(p.assistant, 500))}</blockquote>`,
     )
   }
   html.push(`<p>${escapeHtml('─── Back in Matrix ───')}</p>`)
@@ -148,20 +170,28 @@ export function buildReplay(
   const records = parseJsonl(path)
 
   // Collect local user/assistant text pairs after the cutoff
-  const pairs: { user: string; assistant: string }[] = []
+  const pairs: { user: string; assistant: string; tools: string[] }[] = []
   let pendingUser: string | null = null
+  let pendingTools: string[] = []
 
   for (const r of records) {
     if (since && r.timestamp && new Date(r.timestamp) <= since) continue
 
     if (isLocalUserMessage(r)) {
       const text = extractText(r.message?.content)
-      if (text) pendingUser = text
-    } else if (isAssistantText(r) && pendingUser) {
-      const text = extractText(r.message?.content)
       if (text) {
-        pairs.push({ user: pendingUser, assistant: text })
-        pendingUser = null
+        pendingUser = text
+        pendingTools = []
+      }
+    } else if (r.type === 'assistant' && pendingUser) {
+      pendingTools.push(...extractToolNames(r))
+      if (isAssistantText(r)) {
+        const text = extractText(r.message?.content)
+        if (text) {
+          pairs.push({ user: pendingUser, assistant: text, tools: [...new Set(pendingTools)] })
+          pendingUser = null
+          pendingTools = []
+        }
       }
     }
   }

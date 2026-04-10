@@ -176,11 +176,15 @@ export function handleSSEEvent(
     case 'permission_request': {
       void (async () => {
         try {
-          const msg = [
+          const parts = [
             `**Permission Request** [${event.request_id}]`,
             `Tool: \`${event.tool_name}\``,
             `${event.description}`,
-          ].join('\n')
+          ]
+          if (event.input_preview) {
+            parts.push(`\`\`\`\n${event.input_preview}\n\`\`\``)
+          }
+          const msg = parts.join('\n')
           const { body: plain, formatted_body } = formatMarkdown(msg)
           const eventId = await client.sendMessage(roomId, {
             msgtype: 'm.text',
