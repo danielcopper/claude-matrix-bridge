@@ -112,6 +112,7 @@ function extractToolDetails(r: JsonlRecord): ToolDetail[] {
   for (const b of content) {
     if (b.type !== 'tool_use' || !b.name) continue
     if (b.name.startsWith('mcp__matrix-relay__')) continue
+    if (b.name === 'Read') continue
 
     const detail: ToolDetail = { name: b.name }
     const input = b.input
