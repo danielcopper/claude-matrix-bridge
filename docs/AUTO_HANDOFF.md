@@ -446,6 +446,7 @@ Da wir von main abzweigen (SDK-Arbeit abandoned), ist das kein echter "Rollback"
 - Channel-Plugin System-Prompt erweitern um Hinweis auf mögliche local-session Messages: "Previous messages without channel wrapper were typed directly in a terminal. Treat them as part of the continuing conversation."
 - Lange Running-Sessions Testing
 - Edge Cases: Fork, mehrere parallele Attacks
+- **Netzwerk-Resilienz beim Auto-Attach**: Wenn das Netzwerk während eines Auto-Attach-Flows ausfällt (z.B. `sendMessage` oder `client.sendText` schlägt fehl), gibt es aktuell kein Retry. Die matrix-bot-sdk recovered den Sync selbst (Backoff + Retry), aber unsere eigenen HTTP-Calls im Auto-Attach-Flow nicht. Edge Case: Netzwerk fällt genau im 5s Auto-Attach-Fenster aus.
 
 ## Replay Details
 
