@@ -23,6 +23,7 @@ import { sendPermission, sendMessage, waitForHealth, connectSSE } from './relay-
 import { spawnClaude } from './process-manager.js'
 import { handleCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
+import { buildReplay } from './replay.js'
 
 const SDK_LOG_LEVELS: Record<string, LogLevel> = {
   debug: LogLevel.DEBUG,
@@ -398,10 +399,23 @@ async function autoAttachSession(
     logger,
   )
 
-  await client.sendText(
-    roomId,
-    wasLocal ? 'Local session closed, Matrix control resumed.' : 'Session re-attached.',
-  )
+  // Post replay of local activity before resuming Matrix conversation
+  if (wasLocal) {
+    const since = session.last_matrix_activity ? new Date(session.last_matrix_activity) : null
+    const replay = buildReplay(session.id, session.working_directory, since, config.replay.maxPairs)
+    if (replay) {
+      const { body: plain, formatted_body } = formatMarkdown(replay)
+      await client.sendMessage(roomId, {
+        msgtype: 'm.text',
+        body: plain,
+        format: 'org.matrix.custom.html',
+        formatted_body,
+      })
+    }
+    await client.sendText(roomId, 'Local session closed, Matrix control resumed.')
+  } else {
+    await client.sendText(roomId, 'Session re-attached.')
+  }
 
   // Brief wait for Claude to fully initialize the channel after startup.
   // Health check only confirms the relay HTTP server is up — Claude needs
