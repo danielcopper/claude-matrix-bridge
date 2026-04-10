@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, basename as pathBasename } from 'node:path'
 import { homedir } from 'node:os'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
+
+// --- JSONL types ---
 
 interface JsonlRecord {
   type: string
@@ -19,15 +21,30 @@ interface ContentBlock {
   input?: Record<string, unknown>
 }
 
-interface ReplayMessage {
-  role: 'user' | 'assistant'
-  text: string
+// --- Tool detail types ---
+
+interface ToolDetail {
+  name: string
+  filePath?: string
+  oldStr?: string
+  newStr?: string
+  command?: string
+  content?: string
 }
 
-/**
- * Encode a working directory path the way Claude Code does for its
- * projects directory: replace all `/` with `-`.
- */
+interface ReplayPair {
+  user: string
+  tools: ToolDetail[]
+  assistant: string
+}
+
+export interface ReplayBlock {
+  body: string
+  formatted_body: string
+}
+
+// --- JSONL helpers ---
+
 function encodeWorkDir(workDir: string): string {
   return workDir.replaceAll('/', '-')
 }
@@ -46,7 +63,7 @@ function parseJsonl(path: string): JsonlRecord[] {
     try {
       records.push(JSON.parse(line) as JsonlRecord)
     } catch {
-      // Partial or corrupt line — skip
+      // Partial or corrupt line
     }
   }
   return records
@@ -55,12 +72,9 @@ function parseJsonl(path: string): JsonlRecord[] {
 function extractText(content: string | ContentBlock[] | undefined): string | null {
   if (!content) return null
   if (typeof content === 'string') return content.trim() || null
-
   const texts: string[] = []
   for (const block of content) {
-    if (block.type === 'text' && block.text) {
-      texts.push(block.text)
-    }
+    if (block.type === 'text' && block.text) texts.push(block.text)
   }
   return texts.length > 0 ? texts.join('\n').trim() || null : null
 }
@@ -69,7 +83,6 @@ function isLocalUserMessage(r: JsonlRecord): boolean {
   if (r.type !== 'user') return false
   if (r.isMeta) return false
   if (r.origin?.kind === 'channel') return false
-  // tool_result entries have array content with type: 'tool_result'
   const content = r.message?.content
   if (Array.isArray(content)) {
     return content.some((b: ContentBlock) => b.type === 'text')
@@ -88,56 +101,98 @@ function isAssistantText(r: JsonlRecord): boolean {
   return false
 }
 
-function toolSummary(b: ContentBlock): string | null {
-  if (b.type !== 'tool_use' || !b.name) return null
-  if (b.name.startsWith('mcp__matrix-relay__')) return null
+// --- Tool extraction ---
 
-  const name = b.name
-  const filePath = typeof b.input?.file_path === 'string'
-    ? b.input.file_path.replace(/^.*\//, '') // basename
-    : null
-
-  if (filePath) return `${name}: ${filePath}`
-  if (name === 'Bash' && typeof b.input?.command === 'string') {
-    const cmd = b.input.command.slice(0, 40)
-    return `Bash: ${cmd}${b.input.command.length > 40 ? '…' : ''}`
-  }
-  return name
-}
-
-function extractToolSummaries(r: JsonlRecord): string[] {
+function extractToolDetails(r: JsonlRecord): ToolDetail[] {
   if (r.type !== 'assistant') return []
   const content = r.message?.content
   if (!Array.isArray(content)) return []
-  return content.map(toolSummary).filter((s): s is string => !!s)
+
+  const details: ToolDetail[] = []
+  for (const b of content) {
+    if (b.type !== 'tool_use' || !b.name) continue
+    if (b.name.startsWith('mcp__matrix-relay__')) continue
+
+    const detail: ToolDetail = { name: b.name }
+    const input = b.input
+
+    if (input && typeof input.file_path === 'string') {
+      detail.filePath = input.file_path
+    }
+    if (b.name === 'Edit' && input) {
+      if (typeof input.old_string === 'string') detail.oldStr = input.old_string
+      if (typeof input.new_string === 'string') detail.newStr = input.new_string
+    }
+    if (b.name === 'Write' && input && typeof input.content === 'string') {
+      detail.content = input.content
+    }
+    if ((b.name === 'Bash' || b.name === 'bash') && input && typeof input.command === 'string') {
+      detail.command = input.command
+    }
+
+    details.push(detail)
+  }
+  return details
 }
+
+// --- HTML formatting ---
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function truncateText(text: string, maxLen: number): string {
+function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text
   return text.slice(0, maxLen - 1) + '…'
 }
 
-export interface ReplayBlock {
-  body: string
-  formatted_body: string
+function formatToolHtml(tool: ToolDetail): string {
+  const parts: string[] = []
+  const file = tool.filePath ? pathBasename(tool.filePath) : null
+
+  if (tool.name === 'Edit' && file && (tool.oldStr || tool.newStr)) {
+    parts.push(`<code>Edit: ${escapeHtml(file)}</code>`)
+    const diffLines: string[] = []
+    for (const l of (tool.oldStr ?? '').split('\n')) { if (l) diffLines.push(`- ${l}`) }
+    for (const l of (tool.newStr ?? '').split('\n')) { if (l) diffLines.push(`+ ${l}`) }
+    if (diffLines.length > 0) {
+      parts.push(`<pre>${escapeHtml(truncate(diffLines.join('\n'), 400))}</pre>`)
+    }
+  } else if ((tool.name === 'Bash' || tool.name === 'bash') && tool.command) {
+    parts.push(`<code>$ ${escapeHtml(truncate(tool.command, 200))}</code>`)
+  } else if (tool.name === 'Write' && file) {
+    parts.push(`<code>Write: ${escapeHtml(file)}</code>`)
+  } else if (tool.name === 'Read' && file) {
+    parts.push(`<code>Read: ${escapeHtml(file)}</code>`)
+  } else if (file) {
+    parts.push(`<code>${escapeHtml(tool.name)}: ${escapeHtml(file)}</code>`)
+  } else {
+    parts.push(`<code>${escapeHtml(tool.name)}</code>`)
+  }
+
+  return parts.join('')
 }
 
-function formatToolTag(tools: string[]): string {
-  if (tools.length === 0) return ''
-  return `[${tools.join(', ')}] `
+function formatToolPlain(tool: ToolDetail): string {
+  const file = tool.filePath ? pathBasename(tool.filePath) : null
+
+  if (tool.name === 'Edit' && file && (tool.oldStr || tool.newStr)) {
+    const lines = [`Edit: ${file}`]
+    for (const l of (tool.oldStr ?? '').split('\n')) { if (l) lines.push(`  - ${l}`) }
+    for (const l of (tool.newStr ?? '').split('\n')) { if (l) lines.push(`  + ${l}`) }
+    return truncate(lines.join('\n'), 400)
+  }
+  if ((tool.name === 'Bash' || tool.name === 'bash') && tool.command) {
+    return `$ ${truncate(tool.command, 200)}`
+  }
+  if (file) return `${tool.name}: ${file}`
+  return tool.name
 }
 
-function formatToolTagHtml(tools: string[]): string {
-  if (tools.length === 0) return ''
-  return `<code>${escapeHtml(tools.join(', '))}</code> `
-}
+// --- Replay block builder ---
 
 function formatReplayBlock(
-  pairs: { user: string; assistant: string; tools: string[] }[],
+  pairs: ReplayPair[],
   totalPairs: number,
   maxPairs: number,
   since: Date,
@@ -148,29 +203,35 @@ function formatReplayBlock(
     ? `─── Local session activity (${pairs.length} of ${totalPairs} exchanges) ───`
     : '─── Local session activity ───'
 
-  // Plain text fallback
+  // Plain text
   const plain: string[] = [header, `(from terminal, ${dateStr})`, '']
   for (const p of pairs) {
-    plain.push(`User: ${truncateText(p.user, 500)}`)
-    plain.push(`Claude: ${formatToolTag(p.tools)}${truncateText(p.assistant, 500)}`)
+    plain.push(`User: ${truncate(p.user, 500)}`)
+    for (const t of p.tools) plain.push(formatToolPlain(t))
+    plain.push(`Claude: ${truncate(p.assistant, 500)}`)
     plain.push('')
   }
   plain.push('─── Back in Matrix ───')
 
-  // HTML with proper line breaks
+  // HTML
   const html: string[] = [
     `<p>${escapeHtml(header)}<br><i>(from terminal, ${escapeHtml(dateStr)})</i></p>`,
   ]
   for (const p of pairs) {
+    const toolsHtml = p.tools.map(t => formatToolHtml(t)).join('<br>')
+    const toolSection = toolsHtml ? `<br>${toolsHtml}<br>` : '<br>'
     html.push(
-      `<blockquote><b>User:</b> ${escapeHtml(truncateText(p.user, 500))}<br>`
-      + `<i>Claude:</i> ${formatToolTagHtml(p.tools)}${escapeHtml(truncateText(p.assistant, 500))}</blockquote>`,
+      `<blockquote><b>User:</b> ${escapeHtml(truncate(p.user, 500))}`
+      + toolSection
+      + `<b>Claude:</b> ${escapeHtml(truncate(p.assistant, 500))}</blockquote>`,
     )
   }
   html.push(`<p>${escapeHtml('─── Back in Matrix ───')}</p>`)
 
   return { body: plain.join('\n'), formatted_body: html.join('\n') }
 }
+
+// --- Public API ---
 
 export function buildReplay(
   sessionId: string,
@@ -183,10 +244,9 @@ export function buildReplay(
 
   const records = parseJsonl(path)
 
-  // Collect local user/assistant text pairs after the cutoff
-  const pairs: { user: string; assistant: string; tools: string[] }[] = []
+  const pairs: ReplayPair[] = []
   let pendingUser: string | null = null
-  let pendingTools: string[] = []
+  let pendingTools: ToolDetail[] = []
 
   for (const r of records) {
     if (since && r.timestamp && new Date(r.timestamp) <= since) continue
@@ -198,11 +258,11 @@ export function buildReplay(
         pendingTools = []
       }
     } else if (r.type === 'assistant' && pendingUser) {
-      pendingTools.push(...extractToolSummaries(r))
+      pendingTools.push(...extractToolDetails(r))
       if (isAssistantText(r)) {
         const text = extractText(r.message?.content)
         if (text) {
-          pairs.push({ user: pendingUser, assistant: text, tools: [...new Set(pendingTools)] })
+          pairs.push({ user: pendingUser, tools: pendingTools, assistant: text })
           pendingUser = null
           pendingTools = []
         }
@@ -213,7 +273,7 @@ export function buildReplay(
   if (pairs.length === 0) return null
 
   const totalPairs = pairs.length
-  const shown = pairs.slice(-maxPairs) // Show most recent if truncated
+  const shown = pairs.slice(-maxPairs)
 
   return formatReplayBlock(shown, totalPairs, maxPairs, since ?? new Date())
 }
