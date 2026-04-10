@@ -354,10 +354,6 @@ async function autoAttachSession(
 
   const wasLocal = session.status === 'local_active'
 
-  if (wasLocal && session.local_pid) {
-    await killLocalClaude(session.local_pid, logger)
-  }
-
   // Allocate a fresh port — the old port (if any) may be stale or reused.
   const port = nextFreePort(db, config.ports.start, config.ports.end)
   if (!port) {
@@ -365,8 +361,15 @@ async function autoAttachSession(
     return
   }
 
+  // Transition to 'active' BEFORE killing local claude. The dying process
+  // fires a SessionEnd hook — with status already 'active', handleSessionEnd
+  // skips its handling (no redundant "Local session ended" message).
   updateSession(db, session.id, { status: 'active', port, local_pid: null })
   releasePort(port)
+
+  if (wasLocal && session.local_pid) {
+    await killLocalClaude(session.local_pid, logger)
+  }
 
   const updated: Session = { ...session, status: 'active', port, local_pid: null }
 
@@ -396,6 +399,11 @@ async function autoAttachSession(
     roomId,
     wasLocal ? 'Local session closed, Matrix control resumed.' : 'Session re-attached.',
   )
+
+  // Brief wait for Claude to fully initialize the channel after startup.
+  // Health check only confirms the relay HTTP server is up — Claude needs
+  // a moment longer to wire up the channel protocol after resume.
+  await new Promise(r => setTimeout(r, 2000))
 
   await client.setTyping(roomId, true, 30000)
   await sendMessage(port, sender, body)
