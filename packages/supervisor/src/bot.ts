@@ -404,12 +404,11 @@ async function autoAttachSession(
     const since = session.last_matrix_activity ? new Date(session.last_matrix_activity) : null
     const replay = buildReplay(session.id, session.working_directory, since, config.replay.maxPairs)
     if (replay) {
-      const { body: plain, formatted_body } = formatMarkdown(replay)
       await client.sendMessage(roomId, {
         msgtype: 'm.text',
-        body: plain,
+        body: replay.body,
         format: 'org.matrix.custom.html',
-        formatted_body,
+        formatted_body: replay.formatted_body,
       })
     }
     await client.sendText(roomId, 'Local session closed, Matrix control resumed.')

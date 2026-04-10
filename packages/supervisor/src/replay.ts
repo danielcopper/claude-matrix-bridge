@@ -86,36 +86,54 @@ function isAssistantText(r: JsonlRecord): boolean {
   return false
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 function truncateText(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text
   return text.slice(0, maxLen - 1) + '…'
 }
 
+export interface ReplayBlock {
+  body: string
+  formatted_body: string
+}
+
 function formatReplayBlock(
-  messages: ReplayMessage[],
+  pairs: { user: string; assistant: string }[],
   totalPairs: number,
   maxPairs: number,
   since: Date,
-): string {
-  const shownPairs = Math.min(totalPairs, maxPairs)
+): ReplayBlock {
   const dateStr = since.toISOString().replace('T', ' ').slice(0, 16)
 
   const header = totalPairs > maxPairs
-    ? `─── Local session activity (${shownPairs} of ${totalPairs} exchanges) ───`
+    ? `─── Local session activity (${pairs.length} of ${totalPairs} exchanges) ───`
     : '─── Local session activity ───'
 
-  const lines = [header, '', `*(from terminal, ${dateStr})*`, '']
-
-  for (let i = 0; i < messages.length; i += 2) {
-    const user = messages[i]
-    const assistant = messages[i + 1]
-    if (user) lines.push(`> **User:** ${truncateText(user.text, 500)}`)
-    if (assistant) lines.push(`> *Claude:* ${truncateText(assistant.text, 500)}`)
-    lines.push('')
+  // Plain text fallback
+  const plain: string[] = [header, `(from terminal, ${dateStr})`, '']
+  for (const p of pairs) {
+    plain.push(`User: ${truncateText(p.user, 500)}`)
+    plain.push(`Claude: ${truncateText(p.assistant, 500)}`)
+    plain.push('')
   }
+  plain.push('─── Back in Matrix ───')
 
-  lines.push('─── Back in Matrix ───')
-  return lines.join('\n')
+  // HTML with proper line breaks
+  const html: string[] = [
+    `<p>${escapeHtml(header)}<br><i>(from terminal, ${escapeHtml(dateStr)})</i></p>`,
+  ]
+  for (const p of pairs) {
+    html.push(
+      `<blockquote><b>User:</b> ${escapeHtml(truncateText(p.user, 500))}<br>`
+      + `<i>Claude:</i> ${escapeHtml(truncateText(p.assistant, 500))}</blockquote>`,
+    )
+  }
+  html.push(`<p>${escapeHtml('─── Back in Matrix ───')}</p>`)
+
+  return { body: plain.join('\n'), formatted_body: html.join('\n') }
 }
 
 export function buildReplay(
@@ -123,7 +141,7 @@ export function buildReplay(
   workDir: string,
   since: Date | null,
   maxPairs: number,
-): string | null {
+): ReplayBlock | null {
   const path = jsonlPath(sessionId, workDir)
   if (!path) return null
 
@@ -153,11 +171,5 @@ export function buildReplay(
   const totalPairs = pairs.length
   const shown = pairs.slice(-maxPairs) // Show most recent if truncated
 
-  const messages: ReplayMessage[] = []
-  for (const pair of shown) {
-    messages.push({ role: 'user', text: pair.user })
-    messages.push({ role: 'assistant', text: pair.assistant })
-  }
-
-  return formatReplayBlock(messages, totalPairs, maxPairs, since ?? new Date())
+  return formatReplayBlock(shown, totalPairs, maxPairs, since ?? new Date())
 }
