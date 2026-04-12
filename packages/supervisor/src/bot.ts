@@ -24,6 +24,12 @@ import { spawnClaude } from './process-manager.js'
 import { handleCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 import { buildReplay } from './replay.js'
+import {
+  safeSendText,
+  safeSendHtml,
+  safeSendMessage,
+  safeSetTyping,
+} from './matrix-send.js'
 
 const SDK_LOG_LEVELS: Record<string, LogLevel> = {
   debug: LogLevel.DEBUG,
@@ -402,7 +408,7 @@ async function autoAttachSession(
   // Allocate a fresh port — the old port (if any) may be stale or reused.
   const port = nextFreePort(db, config.ports.start, config.ports.end)
   if (!port) {
-    await client.sendText(roomId, 'No free ports available. Cannot re-attach session.')
+    await safeSendText(client, roomId, 'No free ports available. Cannot re-attach session.', logger, 'auto-attach:no-free-ports')
     return
   }
 
@@ -421,16 +427,14 @@ async function autoAttachSession(
   spawnClaude(updated, config, db, logger, {
     resume: true,
     onExit: () => {
-      void client
-        .sendHtmlText(roomId, '<strong>Claude session ended.</strong>')
-        .catch(() => {})
+      void safeSendHtml(client, roomId, '<strong>Claude session ended.</strong>', logger, 'session-ended-notice')
     },
   })
 
   const healthy = await waitForHealth(port, logger, 30000)
   if (!healthy) {
     updateSession(db, session.id, { status: 'detached', port: null })
-    await client.sendText(roomId, 'Failed to start session. Send a message to retry.')
+    await safeSendText(client, roomId, 'Failed to start session. Send a message to retry.', logger, 'auto-attach:health-failed')
     return
   }
 
@@ -448,16 +452,22 @@ async function autoAttachSession(
     const since = session.last_matrix_activity ? new Date(session.last_matrix_activity) : null
     const replay = buildReplay(session.id, session.working_directory, since, config.replay.maxPairs)
     if (replay) {
-      await client.sendMessage(roomId, {
-        msgtype: 'm.text',
-        body: replay.body,
-        format: 'org.matrix.custom.html',
-        formatted_body: replay.formatted_body,
-      })
+      await safeSendMessage(
+        client,
+        roomId,
+        {
+          msgtype: 'm.text',
+          body: replay.body,
+          format: 'org.matrix.custom.html',
+          formatted_body: replay.formatted_body,
+        },
+        logger,
+        'auto-attach:replay',
+      )
     }
-    await client.sendText(roomId, 'Local session closed, Matrix control resumed.')
+    await safeSendText(client, roomId, 'Local session closed, Matrix control resumed.', logger, 'auto-attach:handoff-notice')
   } else {
-    await client.sendText(roomId, 'Session re-attached.')
+    await safeSendText(client, roomId, 'Session re-attached.', logger, 'auto-attach:reattached-notice')
   }
 
   // Brief wait for Claude to fully initialize the channel after startup.
@@ -465,7 +475,7 @@ async function autoAttachSession(
   // a moment longer to wire up the channel protocol after resume.
   await new Promise(r => setTimeout(r, 2000))
 
-  await client.setTyping(roomId, true, 30000)
+  await safeSetTyping(client, roomId, true, logger)
   await sendMessage(port, sender, body)
 }
 
@@ -484,17 +494,17 @@ function handleSessionRoomMessage(
   if (tryTextPermissionVerdict(body, session, db, client, roomId, logger)) return
 
   if (session.status === 'archived') {
-    void client.sendText(roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`)
+    void safeSendText(client, roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`, logger, 'room:archived')
     return
   }
   if (session.status === 'spawning') {
-    void client.sendText(roomId, 'Session is starting up, please wait...')
+    void safeSendText(client, roomId, 'Session is starting up, please wait...', logger, 'room:spawning')
     return
   }
 
   if (session.status === 'local_active' || session.status === 'detached') {
     if (autoAttachInProgress.has(session.id)) {
-      void client.sendText(roomId, 'Re-attaching session, please wait...')
+      void safeSendText(client, roomId, 'Re-attaching session, please wait...', logger, 'room:already-attaching')
       return
     }
     autoAttachInProgress.add(session.id)
@@ -503,7 +513,7 @@ function handleSessionRoomMessage(
         await autoAttachSession(session, body, sender, client, db, config, logger)
       } catch (err) {
         logger.error({ err, session: session.name }, 'Auto-attach failed')
-        await client.sendText(roomId, `Auto-attach failed: ${err instanceof Error ? err.message : err}`)
+        await safeSendText(client, roomId, `Auto-attach failed: ${err instanceof Error ? err.message : err}`, logger, 'auto-attach:failure-notice')
       } finally {
         autoAttachInProgress.delete(session.id)
       }
@@ -513,18 +523,18 @@ function handleSessionRoomMessage(
 
   const port = session.port
   if (!port) {
-    void client.sendText(roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`)
+    void safeSendText(client, roomId, `Session has no port assigned. Use \`/attach ${session.name}\` in control room.`, logger, 'room:no-port')
     return
   }
 
   void (async () => {
     try {
-      await client.setTyping(roomId, true, 30000)
+      await safeSetTyping(client, roomId, true, logger)
       await sendMessage(port, sender, body)
     } catch (err) {
       logger.error({ err, session: session.name }, 'Failed to relay message')
-      await client.setTyping(roomId, false)
-      await client.sendText(roomId, `Failed to send message to Claude: ${err instanceof Error ? err.message : err}`)
+      await safeSetTyping(client, roomId, false, logger)
+      await safeSendText(client, roomId, `Failed to send message to Claude: ${err instanceof Error ? err.message : err}`, logger, 'room:relay-failure')
     }
   })()
 }
