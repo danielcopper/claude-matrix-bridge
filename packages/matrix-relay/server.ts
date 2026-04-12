@@ -93,6 +93,9 @@ const mcp = new McpServer(
       '',
       'Messages arrive as <channel source="matrix-relay" chat_id="matrix" message_id="..." user="..." ts="...">.',
       'Use the reply tool to respond. Use react for emoji reactions.',
+      '',
+      'Some earlier user messages in this session may not have a <channel> wrapper — those were typed directly in a terminal during a local claude --resume session.',
+      'Treat them as part of the same continuing conversation.',
     ].join('\n'),
   },
 )
