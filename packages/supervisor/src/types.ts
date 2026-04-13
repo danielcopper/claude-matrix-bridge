@@ -1,7 +1,7 @@
 // --- Session ---
 
 /**
- * Session lifecycle states. See docs/AUTO_HANDOFF.md for the state machine.
+ * Session lifecycle states. See docs/ARCHITECTURE.md for the state machine.
  *
  * - spawning     : supervisor is starting claude (tmux + health check in progress)
  * - active       : supervisor holds the claude session via tmux
