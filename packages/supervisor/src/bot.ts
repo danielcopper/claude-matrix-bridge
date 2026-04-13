@@ -438,7 +438,7 @@ async function autoAttachSession(
     } catch (err) {
       logger.warn({ err, session: session.name }, 'killClaude failed during failed-spawn cleanup')
     }
-    updateSession(db, session.id, { status: 'detached', port: null })
+    updateSession(db, session.id, { status: 'detached', port: null, pid: null })
     await safeSendText(client, roomId, 'Failed to start session. Send a message to retry.', logger, 'auto-attach:health-failed')
     return
   }
