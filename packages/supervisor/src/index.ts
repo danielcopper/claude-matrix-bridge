@@ -10,7 +10,7 @@ import {
   releasePort,
 } from './database.js'
 import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent } from './bot.js'
-import { checkRelayRegistered, spawnClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
+import { checkRelayRegistered, spawnClaude, killClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
 import { startApiServer } from './api.js'
 
@@ -130,10 +130,20 @@ if (activeSessions.length > 0) {
         }
       } else {
         logger.warn({ session: session.name, port }, 'Failed to restore session')
+        try {
+          await killClaude(restored, logger)
+        } catch (killErr) {
+          logger.warn({ err: killErr, session: session.name }, 'killClaude failed during failed-spawn cleanup')
+        }
         updateSession(db, session.id, { status: 'detached', pid: null, port: null })
       }
     } catch (err) {
       logger.error({ err, session: session.name }, 'Error restoring session')
+      try {
+        await killClaude(restored, logger)
+      } catch (killErr) {
+        logger.warn({ err: killErr, session: session.name }, 'killClaude failed during failed-spawn cleanup')
+      }
       updateSession(db, session.id, { status: 'detached', pid: null, port: null })
     }
   }
