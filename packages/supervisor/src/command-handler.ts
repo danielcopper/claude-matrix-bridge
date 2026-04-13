@@ -318,7 +318,12 @@ async function resumeSession(
 
   const healthy = await waitForHealth(port, logger, 30000);
   if (!healthy) {
-    updateSession(db, session.id, { status: "detached", port: null });
+    try {
+      await killClaude(updated, logger);
+    } catch (err) {
+      logger.warn({ err, session: session.name }, "killClaude failed during failed-spawn cleanup");
+    }
+    updateSession(db, session.id, { status: "detached", port: null, pid: null });
     return `Session \`${session.name}\` failed to start. Use /attach to retry.`;
   }
 
@@ -547,7 +552,12 @@ async function handleNew(
 
     const healthy = await waitForHealth(port, logger, 30000);
     if (!healthy) {
-      updateSession(db, session.id, { status: "detached", port: null });
+      try {
+        await killClaude(session, logger);
+      } catch (err) {
+        logger.warn({ err, session: session.name }, "killClaude failed during failed-spawn cleanup");
+      }
+      updateSession(db, session.id, { status: "detached", port: null, pid: null });
       return `Session \`${name}\` created but failed to start. Use /attach to retry.`;
     }
 

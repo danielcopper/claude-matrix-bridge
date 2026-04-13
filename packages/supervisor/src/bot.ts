@@ -20,7 +20,7 @@ import {
   releasePort,
 } from './database.js'
 import { sendPermission, sendMessage, waitForHealth, connectSSE } from './relay-client.js'
-import { spawnClaude } from './process-manager.js'
+import { spawnClaude, killClaude } from './process-manager.js'
 import { handleCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 import { buildReplay } from './replay.js'
@@ -433,7 +433,12 @@ async function autoAttachSession(
 
   const healthy = await waitForHealth(port, logger, 30000)
   if (!healthy) {
-    updateSession(db, session.id, { status: 'detached', port: null })
+    try {
+      await killClaude(updated, logger)
+    } catch (err) {
+      logger.warn({ err, session: session.name }, 'killClaude failed during failed-spawn cleanup')
+    }
+    updateSession(db, session.id, { status: 'detached', port: null, pid: null })
     await safeSendText(client, roomId, 'Failed to start session. Send a message to retry.', logger, 'auto-attach:health-failed')
     return
   }
