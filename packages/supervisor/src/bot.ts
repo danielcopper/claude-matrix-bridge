@@ -370,6 +370,14 @@ function handleControlRoomMessage(
 // Prevents concurrent auto-attach attempts for the same session.
 const autoAttachInProgress = new Set<string>()
 
+// Hard upper bound on how long a single auto-attach attempt may hold its slot
+// in autoAttachInProgress. matrix-bot-sdk has no default client-side timeouts,
+// so a hung Matrix API call inside autoAttachSession would otherwise leak the
+// entry forever and brick the session until supervisor restart. The watchdog
+// is a defensive safety net — under healthy conditions the finally-block
+// clears the entry well before this fires.
+const AUTO_ATTACH_WATCHDOG_MS = 120_000
+
 async function killLocalClaude(pid: number, logger: Logger): Promise<void> {
   try {
     process.kill(pid, 'SIGTERM')
@@ -513,6 +521,14 @@ function handleSessionRoomMessage(
       return
     }
     autoAttachInProgress.add(session.id)
+    const watchdog = setTimeout(() => {
+      if (autoAttachInProgress.delete(session.id)) {
+        logger.warn(
+          { session: session.name, timeoutMs: AUTO_ATTACH_WATCHDOG_MS },
+          'autoAttachInProgress watchdog cleared stale entry — autoAttachSession likely hung in a Matrix call',
+        )
+      }
+    }, AUTO_ATTACH_WATCHDOG_MS)
     void (async () => {
       try {
         await autoAttachSession(session, body, sender, client, db, config, logger)
@@ -520,6 +536,7 @@ function handleSessionRoomMessage(
         logger.error({ err, session: session.name }, 'Auto-attach failed')
         await safeSendText(client, roomId, `Auto-attach failed: ${err instanceof Error ? err.message : err}`, logger, 'auto-attach:failure-notice')
       } finally {
+        clearTimeout(watchdog)
         autoAttachInProgress.delete(session.id)
       }
     })()
