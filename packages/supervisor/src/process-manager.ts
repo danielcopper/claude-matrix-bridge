@@ -178,7 +178,12 @@ export function spawnClaude(
       const pane = capturePane()
       if (pane === null) continue
 
-      if (!trustAnswered && pane.includes('Is this a project you created or trust')) {
+      // Match the highlighted option text rather than the question wording —
+      // the question phrasing ("Is this a project you created or one you trust?")
+      // contains "one you" between "or" and "trust" and is more likely to drift
+      // across Claude Code versions. The option text "Yes, I trust this folder"
+      // is the stable anchor.
+      if (!trustAnswered && pane.includes('Yes, I trust this folder')) {
         sendEnter()
         sessionLogger.info('Auto-confirmed trust prompt')
         trustAnswered = true
