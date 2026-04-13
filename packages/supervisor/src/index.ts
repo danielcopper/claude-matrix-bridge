@@ -27,7 +27,7 @@ const db = openDatabase(config.database.path)
 runMigrations(db)
 
 // --- Recovery / Startup Cleanup ---
-// See docs/AUTO_HANDOFF.md "Recovery / Supervisor Restart" for rationale.
+// See docs/ARCHITECTURE.md "Recovery / Supervisor Restart" for rationale.
 
 // 1. Expire all pending permission requests from previous run —
 //    sessions will be restarted fresh, old permission dialogs are gone.
