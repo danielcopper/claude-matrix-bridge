@@ -143,36 +143,63 @@ export function spawnClaude(
 
   activeSessions.add(session.id)
 
-  // Auto-confirm the development channels prompt.
-  // Poll tmux pane content until the confirmation dialog appears, then send Enter.
+  // Auto-confirm first-launch prompts. Fresh workdirs show Claude Code's trust
+  // prompt ("Is this a project you created or trust") before the dev-channels
+  // prompt. We handle trust first (if present) and keep polling for dev-channels.
+  // Prompts we don't recognise block indefinitely; on timeout we dump the pane
+  // content so future unknown prompts surface immediately in the logs.
   void (async () => {
-    const maxAttempts = 20 // 20 * 500ms = 10s max wait
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise(r => setTimeout(r, 500))
+    const maxAttempts = 40 // 40 * 500ms = 20s max wait
+    let trustAnswered = false
+
+    const sendEnter = (): void => {
+      execFileSync('tmux', tmuxArgs('send-keys', '-t', tmuxName, 'Enter'), {
+        encoding: 'utf-8',
+        timeout: 3000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+    }
+
+    const capturePane = (): string | null => {
       try {
-        const pane = execFileSync('tmux', tmuxArgs('capture-pane', '-t', tmuxName, '-p'), {
+        return execFileSync('tmux', tmuxArgs('capture-pane', '-t', tmuxName, '-p'), {
           encoding: 'utf-8',
           timeout: 3000,
           stdio: ['pipe', 'pipe', 'pipe'],
         })
-        if (pane.includes('I am using this for local development')) {
-          execFileSync('tmux', tmuxArgs('send-keys', '-t', tmuxName, 'Enter'), {
-            encoding: 'utf-8',
-            timeout: 3000,
-            stdio: ['pipe', 'pipe', 'pipe'],
-          })
-          sessionLogger.info('Auto-confirmed development channels prompt')
-          return
-        }
-        if (pane.includes('Listening for channel messages')) {
-          sessionLogger.debug('Channel already active, no confirmation needed')
-          return
-        }
       } catch {
         // tmux session might not be ready yet
+        return null
       }
     }
-    sessionLogger.warn('Development channels prompt not detected within 10s')
+
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 500))
+      const pane = capturePane()
+      if (pane === null) continue
+
+      if (!trustAnswered && pane.includes('Is this a project you created or trust')) {
+        sendEnter()
+        sessionLogger.info('Auto-confirmed trust prompt')
+        trustAnswered = true
+        continue // dev-channels prompt still to come
+      }
+      if (pane.includes('I am using this for local development')) {
+        sendEnter()
+        sessionLogger.info('Auto-confirmed development channels prompt')
+        return
+      }
+      if (pane.includes('Listening for channel messages')) {
+        sessionLogger.debug('Channel already active, no confirmation needed')
+        return
+      }
+    }
+
+    const finalPane = capturePane()
+    sessionLogger.warn(
+      { pane: finalPane?.slice(-500) ?? null, trustAnswered },
+      'Spawn-polling timed out without reaching dev-channels prompt',
+    )
   })()
 
   // Get the PID of the claude process inside tmux
