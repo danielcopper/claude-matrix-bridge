@@ -53,7 +53,7 @@ export async function handleCommand(
     case "/list":
       return handleList(db);
     case "/kill":
-      return handleKill(parts[1], db, logger);
+      return handleKill(parts[1], client, db, logger);
     case "/detach":
       return handleDetach(parts[1], db, logger);
     case "/attach":
@@ -152,6 +152,7 @@ function handleList(db: Database.Database): string {
 
 async function handleKill(
   name: string | undefined,
+  client: MatrixClient,
   db: Database.Database,
   logger: Logger,
 ): Promise<string> {
@@ -177,6 +178,11 @@ async function handleKill(
     port: null,
   });
   expireSessionPermissions(db, session.id);
+
+  // Rename the Matrix room to match so the user can tell which room is archived
+  if (session.room_id) {
+    void client.sendStateEvent(session.room_id, "m.room.name", "", { name: archivedName }).catch(() => {});
+  }
 
   return `Session **${name}** archived as \`${archivedName}\`. Name \`${name}\` is now free for reuse.`;
 }
