@@ -4,9 +4,9 @@ import { homedir } from 'node:os'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
-// --- JSONL types ---
+// --- JSONL types (Claude Code session format) ---
 
-interface JsonlRecord {
+export interface JsonlRecord {
   type: string
   message?: { role?: string; content?: string | ContentBlock[] }
   isMeta?: boolean
@@ -14,7 +14,7 @@ interface JsonlRecord {
   timestamp?: string
 }
 
-interface ContentBlock {
+export interface ContentBlock {
   type: string
   text?: string
   name?: string
@@ -23,7 +23,7 @@ interface ContentBlock {
 
 // --- Tool detail types ---
 
-interface ToolDetail {
+export interface ToolDetail {
   name: string
   filePath?: string
   oldStr?: string
@@ -32,7 +32,7 @@ interface ToolDetail {
   content?: string
 }
 
-interface ReplayPair {
+export interface ReplayPair {
   user: string
   tools: ToolDetail[]
   assistant: string
@@ -55,10 +55,9 @@ function jsonlPath(sessionId: string, workDir: string): string | null {
   return existsSync(path) ? path : null
 }
 
-function parseJsonl(path: string): JsonlRecord[] {
+export function parseJsonl(raw: string): JsonlRecord[] {
   const records: JsonlRecord[] = []
-  const content = readFileSync(path, 'utf-8')
-  for (const line of content.split('\n')) {
+  for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {
       records.push(JSON.parse(line) as JsonlRecord)
@@ -234,17 +233,11 @@ function formatReplayBlock(
 
 // --- Public API ---
 
-export function buildReplay(
-  sessionId: string,
-  workDir: string,
+export function buildReplayFromRecords(
+  records: JsonlRecord[],
   since: Date | null,
   maxPairs: number,
 ): ReplayBlock | null {
-  const path = jsonlPath(sessionId, workDir)
-  if (!path) return null
-
-  const records = parseJsonl(path)
-
   const pairs: ReplayPair[] = []
   let pendingUser: string | null = null
   let pendingTools: ToolDetail[] = []
@@ -277,4 +270,19 @@ export function buildReplay(
   const shown = pairs.slice(-maxPairs)
 
   return formatReplayBlock(shown, totalPairs, maxPairs, since ?? new Date())
+}
+
+export function buildReplay(
+  sessionId: string,
+  workDir: string,
+  since: Date | null,
+  maxPairs: number,
+): ReplayBlock | null {
+  const path = jsonlPath(sessionId, workDir)
+  if (!path) return null
+
+  const raw = readFileSync(path, 'utf-8')
+  const records = parseJsonl(raw)
+
+  return buildReplayFromRecords(records, since, maxPairs)
 }
