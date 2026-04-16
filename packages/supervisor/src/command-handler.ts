@@ -53,7 +53,7 @@ export async function handleCommand(
     case "/list":
       return handleList(db);
     case "/kill":
-      return handleKill(parts[1], db, logger);
+      return handleKill(parts[1], client, db, logger);
     case "/detach":
       return handleDetach(parts[1], db, logger);
     case "/attach":
@@ -152,6 +152,7 @@ function handleList(db: Database.Database): string {
 
 async function handleKill(
   name: string | undefined,
+  client: MatrixClient,
   db: Database.Database,
   logger: Logger,
 ): Promise<string> {
@@ -164,10 +165,26 @@ async function handleKill(
     return `Session \`${name}\` is already archived.`;
 
   await killClaude(session, logger);
-  updateSession(db, session.id, { status: "archived", pid: null, port: null });
+
+  // Rename to free the original name for reuse. Without this, /new <name>
+  // after /kill <name> hits the UNIQUE constraint and is rejected. Suffix
+  // is YYYYMMDD-HHMMSS so /list stays human-readable and entries sort.
+  const ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  const archivedName = `${session.name}-archived-${ts}`;
+  updateSession(db, session.id, {
+    status: "archived",
+    name: archivedName,
+    pid: null,
+    port: null,
+  });
   expireSessionPermissions(db, session.id);
 
-  return `Session **${name}** archived.`;
+  // Rename the Matrix room to match so the user can tell which room is archived
+  if (session.room_id) {
+    void client.sendStateEvent(session.room_id, "m.room.name", "", { name: archivedName }).catch(() => {});
+  }
+
+  return `Session **${name}** archived as \`${archivedName}\`. Name \`${name}\` is now free for reuse.`;
 }
 
 // --- /detach ---
