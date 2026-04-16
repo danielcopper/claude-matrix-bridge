@@ -19,7 +19,7 @@ run = "node dist/index.js"
 
 [tasks.test]
 description = "Run tests"
-run = "npx tsx --test test/**/*.test.ts"
+run = "node --import tsx/esm --test --experimental-test-module-mocks test/**/*.test.ts"
 
 [tasks.typecheck]
 description = "Type-check without emitting"
