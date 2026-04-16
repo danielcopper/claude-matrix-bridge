@@ -20,6 +20,10 @@ description = "Start supervisor in dev mode"
 depends = ["register-relay"]
 run = "cd packages/supervisor && npx tsx src/index.ts"
 
+[tasks.test]
+description = "Run all tests"
+run = "cd packages/supervisor && npm test"
+
 [tasks.typecheck]
 description = "Type-check all packages"
 run = "cd packages/supervisor && npx tsc --noEmit"

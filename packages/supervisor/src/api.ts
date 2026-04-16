@@ -6,6 +6,11 @@ import type { Config } from './config.js'
 import { getSessionById, updateSession } from './database.js'
 import { killClaude } from './process-manager.js'
 
+export interface ApiResult {
+  status: number
+  body: Record<string, unknown>
+}
+
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let data = ''
@@ -44,12 +49,16 @@ export function startApiServer(
       }
 
       if (url === '/api/session/start' && method === 'POST') {
-        await handleSessionStart(req, res, db, client, logger)
+        const body = await readBody(req)
+        const result = await handleSessionStart(body, db, client, logger)
+        json(res, result.status, result.body)
         return
       }
 
       if (url === '/api/session/end' && method === 'POST') {
-        await handleSessionEnd(req, res, db, client, logger)
+        const body = await readBody(req)
+        const result = await handleSessionEnd(body, db, client, logger)
+        json(res, result.status, result.body)
         return
       }
 
@@ -67,46 +76,39 @@ export function startApiServer(
   return server
 }
 
-async function handleSessionStart(
-  req: IncomingMessage,
-  res: ServerResponse,
+export async function handleSessionStart(
+  body: Record<string, unknown>,
   db: Database.Database,
   client: MatrixClient,
   logger: Logger,
-): Promise<void> {
-  const body = await readBody(req)
+): Promise<ApiResult> {
   const sessionId = body.session_id as string | undefined
   const localPid = typeof body.pid === 'number' ? body.pid : null
   if (!sessionId) {
-    json(res, 400, { error: 'session_id required' })
-    return
+    return { status: 400, body: { error: 'session_id required' } }
   }
 
   const session = getSessionById(db, sessionId)
   if (!session) {
-    json(res, 404, { error: 'session not managed by supervisor' })
-    return
+    return { status: 404, body: { error: 'session not managed by supervisor' } }
   }
 
   // Supervisor is currently spawning this session — the hook is from our own
   // spawn, not a local terminal. Ignore it.
   if (session.status === 'spawning') {
     logger.debug({ session: session.name }, 'Ignoring SessionStart from supervisor spawn (status=spawning)')
-    json(res, 200, { status: 'spawning', action: 'ignored' })
-    return
+    return { status: 200, body: { status: 'spawning', action: 'ignored' } }
   }
 
   // Already marked local_active (e.g., hook fired twice) → just update PID
   if (session.status === 'local_active') {
     updateSession(db, session.id, { local_pid: localPid })
-    json(res, 200, { status: 'local_active', action: 'updated_pid' })
-    return
+    return { status: 200, body: { status: 'local_active', action: 'updated_pid' } }
   }
 
   // Archived sessions are no longer tracked
   if (session.status === 'archived') {
-    json(res, 200, { status: 'archived', action: 'none' })
-    return
+    return { status: 200, body: { status: 'archived', action: 'none' } }
   }
 
   // Active: the supervisor currently holds the session in tmux.
@@ -139,33 +141,28 @@ async function handleSessionStart(
     void client.sendText(session.room_id, msg).catch(() => {})
   }
 
-  json(res, 200, { status: 'local_active', action: 'detached' })
+  return { status: 200, body: { status: 'local_active', action: 'detached' } }
 }
 
-async function handleSessionEnd(
-  req: IncomingMessage,
-  res: ServerResponse,
+export async function handleSessionEnd(
+  body: Record<string, unknown>,
   db: Database.Database,
   client: MatrixClient,
   logger: Logger,
-): Promise<void> {
-  const body = await readBody(req)
+): Promise<ApiResult> {
   const sessionId = body.session_id as string | undefined
   if (!sessionId) {
-    json(res, 400, { error: 'session_id required' })
-    return
+    return { status: 400, body: { error: 'session_id required' } }
   }
 
   const session = getSessionById(db, sessionId)
   if (!session) {
-    json(res, 404, { error: 'session not managed by supervisor' })
-    return
+    return { status: 404, body: { error: 'session not managed by supervisor' } }
   }
 
   // Only relevant if we thought the session was local_active.
   if (session.status !== 'local_active') {
-    json(res, 200, { status: session.status, action: 'none' })
-    return
+    return { status: 200, body: { status: session.status, action: 'none' } }
   }
 
   // When we auto-detach (kill supervisor's tmux claude), that dying process
@@ -177,8 +174,7 @@ async function handleSessionEnd(
       { session: session.name, hookPid, localPid: session.local_pid },
       'Ignoring SessionEnd from killed supervisor claude (not the local process)',
     )
-    json(res, 200, { status: session.status, action: 'ignored' })
-    return
+    return { status: 200, body: { status: session.status, action: 'ignored' } }
   }
 
   logger.info({ session: session.name }, 'Local session ended, session now idle')
@@ -193,5 +189,5 @@ async function handleSessionEnd(
       .catch(() => {})
   }
 
-  json(res, 200, { status: 'detached', action: 'released' })
+  return { status: 200, body: { status: 'detached', action: 'released' } }
 }

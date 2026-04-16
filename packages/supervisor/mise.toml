@@ -17,6 +17,10 @@ run = "npx tsc"
 description = "Run compiled supervisor"
 run = "node dist/index.js"
 
+[tasks.test]
+description = "Run tests"
+run = "npx tsx --test test/**/*.test.ts"
+
 [tasks.typecheck]
 description = "Type-check without emitting"
 run = "npx tsc --noEmit"
