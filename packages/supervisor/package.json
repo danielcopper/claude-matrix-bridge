@@ -7,7 +7,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "tsx --test test/**/*.test.ts"
+    "test": "node --import tsx/esm --test --experimental-test-module-mocks test/**/*.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
