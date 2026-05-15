@@ -639,16 +639,17 @@ async function handleNew(
   }
 }
 
-// --- !mode / :mode (in-session bridge command) ---
+// --- !mode (in-session bridge command) ---
 //
 // Lives in session rooms so users can switch permission modes without
-// disturbing the running claude. Uses tmux send-keys + capture-pane instead
-// of kill+resume — claude's session continues uninterrupted.
+// disturbing the running claude. Uses tmux send-keys to cycle the TUI and
+// reads the resulting mode from the session JSONL.
 //
-// `/` prefix is reserved for claude's own slash commands and skills, so we
-// use `!` (mautrix convention) and `:` (lightweight alternative).
+// `/` is reserved for claude's own slash commands and skills. `:` was
+// considered but conflicts with Element's emoji autocomplete. `!` (mautrix
+// convention) is the only prefix.
 
-const MODE_COMMAND_RE = /^[!:]mode(?:\s+(.*))?$/;
+const MODE_COMMAND_RE = /^!mode(?:\s+(.*))?$/;
 const MODE_LIST_HTML = "default | plan | acceptEdits | auto";
 
 /** Cheap sync check used in the message handler to decide whether to

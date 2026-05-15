@@ -55,17 +55,9 @@ describe('isModeCommand', () => {
     assert.equal(isModeCommand('!mode'), true)
   })
 
-  it('matches :mode exactly', () => {
-    assert.equal(isModeCommand(':mode'), true)
-  })
-
   it('matches !mode with args', () => {
     assert.equal(isModeCommand('!mode auto'), true)
     assert.equal(isModeCommand('!mode hallo du frosch'), true)
-  })
-
-  it('matches :mode with args', () => {
-    assert.equal(isModeCommand(':mode plan'), true)
   })
 
   it('handles leading/trailing whitespace', () => {
@@ -76,15 +68,19 @@ describe('isModeCommand', () => {
     assert.equal(isModeCommand('/mode auto'), false)
   })
 
+  it('does NOT match :mode (collides with Element emoji autocomplete)', () => {
+    assert.equal(isModeCommand(':mode'), false)
+    assert.equal(isModeCommand(':mode auto'), false)
+  })
+
   it('does NOT match typos like !modus or !mod', () => {
     assert.equal(isModeCommand('!modus auto'), false)
     assert.equal(isModeCommand('!mod auto'), false)
     assert.equal(isModeCommand('!modecycle'), false)
   })
 
-  it('does NOT match unrelated messages starting with ! or :', () => {
+  it('does NOT match unrelated messages starting with !', () => {
     assert.equal(isModeCommand('!hello'), false)
-    assert.equal(isModeCommand(':help'), false)
     assert.equal(isModeCommand('hello !mode'), false)
   })
 
