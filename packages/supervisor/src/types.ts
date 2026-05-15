@@ -16,7 +16,17 @@ export type SessionStatus =
   | 'detached'
   | 'archived'
 
-export type PermissionMode = 'default' | 'plan' | 'bypassPermissions'
+export type PermissionMode =
+  | 'default'
+  | 'plan'
+  | 'acceptEdits'
+  | 'auto'
+  | 'bypassPermissions'
+
+/** Modes the user can pick via /mode and /new --mode. bypassPermissions is
+ *  set elsewhere (config/env) and intentionally not user-switchable. */
+export const USER_PERMISSION_MODES = ['default', 'plan', 'acceptEdits', 'auto'] as const
+export type UserPermissionMode = (typeof USER_PERMISSION_MODES)[number]
 
 export interface Session {
   id: string

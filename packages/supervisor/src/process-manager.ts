@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import type { Logger } from 'pino'
 import type Database from 'better-sqlite3'
-import type { Session } from './types.js'
+import type { Session, UserPermissionMode } from './types.js'
 import { updateSession, expireSessionPermissions } from './database.js'
 
 /**
@@ -102,6 +102,8 @@ export function spawnClaude(
 
   if (session.permission_mode === 'bypassPermissions') {
     claudeArgs.push('--dangerously-skip-permissions')
+  } else if (session.permission_mode !== 'default') {
+    claudeArgs.push('--permission-mode', session.permission_mode)
   }
 
   // Construct the full command string for tmux
@@ -244,6 +246,97 @@ export function spawnClaude(
 }
 
 const exitPollers = new Map<string, ReturnType<typeof setInterval>>()
+
+// --- Permission-mode runtime control ---
+//
+// Claude's TUI cycles permission modes on Shift+Tab. There is no IPC for this
+// — the only way from outside is sending the key into the tmux pane and
+// reading the TUI's mode indicator back via capture-pane. Patterns are tied
+// to claude's display strings and may need updating across versions.
+
+/** Lowercased substrings claude prints in the TUI for each mode. */
+const MODE_PATTERNS: Record<Exclude<UserPermissionMode, 'default'>, readonly string[]> = {
+  plan: ['plan mode on', '⏵⏵ plan'],
+  acceptEdits: ['accept edits on', 'auto-accept edits', 'accept-edits on'],
+  auto: ['auto mode on'],
+}
+
+function capturePaneText(tmuxName: string): string | null {
+  try {
+    return execFileSync('tmux', tmuxArgs('capture-pane', '-t', tmuxName, '-p'), {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+  } catch {
+    return null
+  }
+}
+
+/** Read the current permission mode from the TUI. Returns null if the pane
+ *  can't be read; returns 'default' if no recognised indicator is shown. */
+export function readPermissionMode(session: Session): UserPermissionMode | null {
+  const pane = capturePaneText(tmuxSessionName(session))
+  if (pane === null) return null
+  const lower = pane.toLowerCase()
+  for (const [mode, patterns] of Object.entries(MODE_PATTERNS)) {
+    for (const p of patterns) {
+      if (lower.includes(p)) return mode as UserPermissionMode
+    }
+  }
+  return 'default'
+}
+
+/** Send one Shift+Tab into the session's tmux pane. */
+function sendShiftTab(tmuxName: string): boolean {
+  try {
+    execFileSync('tmux', tmuxArgs('send-keys', '-t', tmuxName, 'BTab'), {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Cycle the TUI's permission mode (via Shift+Tab) until it matches `target`,
+ *  reading the mode back from the pane between presses. */
+export async function cycleToPermissionMode(
+  session: Session,
+  target: UserPermissionMode,
+  logger: Logger,
+): Promise<{ ok: boolean; mode: UserPermissionMode | null; reason?: string }> {
+  const tmuxName = tmuxSessionName(session)
+  const start = readPermissionMode(session)
+  if (start === null) {
+    return { ok: false, mode: null, reason: 'could not read terminal' }
+  }
+  if (start === target) return { ok: true, mode: target }
+
+  // Safety cap — claude has 4 known modes; 6 leaves room for one extra without
+  // burning the planet on a misread.
+  const maxAttempts = 6
+  for (let i = 0; i < maxAttempts; i++) {
+    if (!sendShiftTab(tmuxName)) {
+      return { ok: false, mode: readPermissionMode(session), reason: 'send-keys failed' }
+    }
+    // Let the TUI redraw before reading.
+    await new Promise(r => setTimeout(r, 150))
+    const now = readPermissionMode(session)
+    if (now === target) {
+      logger.debug({ session: session.name, from: start, to: now, cycles: i + 1 }, 'Mode cycled')
+      return { ok: true, mode: target }
+    }
+  }
+
+  return {
+    ok: false,
+    mode: readPermissionMode(session),
+    reason: `cycled ${maxAttempts} times without reaching ${target}`,
+  }
+}
 
 export async function killClaude(
   session: Session,
