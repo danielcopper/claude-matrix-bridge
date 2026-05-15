@@ -684,7 +684,7 @@ export async function handleModeCommand(
       );
       return;
     }
-    const current = readPermissionMode(session);
+    const current = readPermissionMode(session.id, session.working_directory);
     if (current === null) {
       await safeSendHtml(
         client,

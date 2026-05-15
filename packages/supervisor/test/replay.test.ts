@@ -4,6 +4,7 @@ import {
   parseJsonl,
   buildReplayFromRecords,
   hasUserActivityFromRecords,
+  readPermissionModeFromRecords,
   type JsonlRecord,
 } from '../src/replay.js'
 
@@ -536,5 +537,55 @@ describe('hasUserActivityFromRecords', () => {
     // Conceptual check: a mix of meta + one real user message returns true.
     const records: JsonlRecord[] = [metaRecord(), metaRecord(), userRecord('go')]
     assert.equal(hasUserActivityFromRecords(records), true)
+  })
+})
+
+// --- readPermissionModeFromRecords ---
+
+function modeRecord(mode: string): JsonlRecord {
+  return { type: 'permission-mode', permissionMode: mode }
+}
+
+describe('readPermissionModeFromRecords', () => {
+  it('returns null for empty records', () => {
+    assert.equal(readPermissionModeFromRecords([]), null)
+  })
+
+  it('returns null when no permission-mode records exist', () => {
+    assert.equal(readPermissionModeFromRecords(simplePair('hi', 'hello')), null)
+  })
+
+  it('returns the only permission-mode value present', () => {
+    assert.equal(readPermissionModeFromRecords([modeRecord('plan')]), 'plan')
+  })
+
+  it('returns the most recent permission-mode (walks from end)', () => {
+    const records: JsonlRecord[] = [
+      modeRecord('default'),
+      ...simplePair('do thing', 'done'),
+      modeRecord('acceptEdits'),
+      ...simplePair('more', 'ok'),
+      modeRecord('auto'),
+    ]
+    assert.equal(readPermissionModeFromRecords(records), 'auto')
+  })
+
+  it('accepts all known modes including bypassPermissions', () => {
+    for (const m of ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions']) {
+      assert.equal(readPermissionModeFromRecords([modeRecord(m)]), m)
+    }
+  })
+
+  it('skips unknown mode values', () => {
+    const records: JsonlRecord[] = [modeRecord('plan'), modeRecord('quantum')]
+    assert.equal(readPermissionModeFromRecords(records), 'plan')
+  })
+
+  it('skips records with missing permissionMode field', () => {
+    const records: JsonlRecord[] = [
+      modeRecord('plan'),
+      { type: 'permission-mode' },
+    ]
+    assert.equal(readPermissionModeFromRecords(records), 'plan')
   })
 })
