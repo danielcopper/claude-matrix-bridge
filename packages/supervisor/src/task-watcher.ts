@@ -85,9 +85,12 @@ function escapeHtml(s: string): string {
 }
 
 /** Format the current task set as a Matrix message. Returns null if there
- *  are no tasks at all (nothing to post). */
+ *  are no tasks at all (nothing to post).
+ *
+ *  Body lines start with a space because Element strips newlines in pin
+ *  previews and topic state-change notices — the leading space keeps items
+ *  visually separated even when collapsed to one line. */
 export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_body: string } | null {
-  // Hide deleted/unknown statuses — claude treats those as gone.
   const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
   if (visible.length === 0) return null
 
@@ -102,7 +105,7 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
     const subject = t.subject || `(no subject)`
     const activeForm = t.status === 'in_progress' && t.activeForm ? ` (${t.activeForm})` : ''
 
-    plainLines.push(`${icon} #${t.id} ${subject}${activeForm}`)
+    plainLines.push(` ${icon} #${t.id} ${subject}${activeForm}`)
 
     const subjectHtml = escapeHtml(subject)
     const activeFormHtml = activeForm ? ` <i>${escapeHtml(activeForm.trim())}</i>` : ''
@@ -117,8 +120,9 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
   return { body: plainLines.join('\n'), formatted_body: htmlLines.join('') }
 }
 
-/** Full task list as plain text, suitable for `m.room.topic`. Newlines are
- *  rendered by Element. Returns null when nothing is visible. */
+/** Full task list for `m.room.topic`. One task per line; each item line
+ *  starts with a space so Element's chat-start topic notice (which strips
+ *  newlines) still renders the items separated. */
 export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
   const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
   if (visible.length === 0) return null
@@ -130,7 +134,7 @@ export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
     const icon = STATUS_ICON[t.status] ?? '•'
     const subject = t.subject || `(no subject)`
     const activeForm = t.status === 'in_progress' && t.activeForm ? ` (${t.activeForm})` : ''
-    lines.push(`${icon} ${subject}${activeForm}`)
+    lines.push(` ${icon} ${subject}${activeForm}`)
   }
 
   return lines.join('\n')
@@ -167,11 +171,12 @@ export function startTaskMirror(
   stopTaskMirror(session.id)
   if (!session.room_id) return
 
-  // Seed the digest with the current state so we don't spam the room on
-  // attach with the same task list that's already there from a prior post.
-  const seed = readTasks(session.id)
+  // Don't seed the digest. The first tick reconciles whatever state is on
+  // disk against the pinned message — if the user edited tasks in a local
+  // terminal while the supervisor was offline, those changes get posted
+  // immediately on resume instead of waiting for the next on-disk change.
   const state: WatcherState = {
-    lastDigest: seed.length > 0 ? tasksDigest(seed) : null,
+    lastDigest: null,
     lastTaskDirMtime: 0,
     pollHandle: setInterval(() => {
       void tick(session.id, client, db, logger).catch(err => {

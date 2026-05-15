@@ -40,16 +40,17 @@ describe('formatTasksAsMatrix', () => {
     assert.match(result.body, /4 total, 2 done/)
   })
 
-  it('uses ✅ 🟡 ⬜ icons in the body', () => {
+  it('uses ✅ 🟡 ⬜ icons in the body with a leading space per item', () => {
     const result = formatTasksAsMatrix([
       task('1', 'completed'),
       task('2', 'in_progress'),
       task('3', 'pending'),
     ])
     assert.ok(result)
-    assert.match(result.body, /✅ #1/)
-    assert.match(result.body, /🟡 #2/)
-    assert.match(result.body, /⬜ #3/)
+    // Leading space keeps items separated when clients collapse newlines
+    assert.match(result.body, /\n ✅ #1/)
+    assert.match(result.body, /\n 🟡 #2/)
+    assert.match(result.body, /\n ⬜ #3/)
   })
 
   it('renders strikethrough for completed and bold for in_progress in HTML', () => {
@@ -73,7 +74,7 @@ describe('formatTasksAsMatrix', () => {
     assert.ok(result)
     assert.match(result.body, /🟡 #2 doing \(Doing the thing\)/)
     // Completed should NOT show activeForm
-    assert.doesNotMatch(result.body, /Doing it/)
+    assert.doesNotMatch(result.body, /\bDoing it\b/)
   })
 
   it('escapes HTML metacharacters in subjects', () => {
@@ -93,7 +94,7 @@ describe('formatTasksAsRoomTopic', () => {
     assert.equal(formatTasksAsRoomTopic([task('1', 'deleted')]), null)
   })
 
-  it('renders the full list as multi-line plain text', () => {
+  it('renders the full list as multi-line plain text with leading-space items', () => {
     const topic = formatTasksAsRoomTopic([
       task('1', 'completed', 'one'),
       task('2', 'in_progress', 'two', { activeForm: 'Doing two' }),
@@ -101,18 +102,18 @@ describe('formatTasksAsRoomTopic', () => {
     ])
     assert.equal(
       topic,
-      '📋 Tasks (1/3)\n✅ one\n🟡 two (Doing two)\n⬜ three',
+      '📋 Tasks (1/3)\n ✅ one\n 🟡 two (Doing two)\n ⬜ three',
     )
   })
 
-  it('shows just the header counts when there are no in-progress tasks', () => {
+  it('shows full list even when there are no in-progress tasks', () => {
     const topic = formatTasksAsRoomTopic([
       task('1', 'completed', 'a'),
       task('2', 'pending', 'b'),
     ])
     assert.ok(topic?.startsWith('📋 Tasks (1/2)\n'))
-    assert.match(topic ?? '', /✅ a/)
-    assert.match(topic ?? '', /⬜ b/)
+    assert.match(topic ?? '', /\n ✅ a/)
+    assert.match(topic ?? '', /\n ⬜ b/)
   })
 
   it('skips activeForm for completed tasks even if set', () => {
