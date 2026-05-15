@@ -93,30 +93,33 @@ describe('formatTasksAsRoomTopic', () => {
     assert.equal(formatTasksAsRoomTopic([task('1', 'deleted')]), null)
   })
 
-  it('shows just counts when nothing in progress', () => {
+  it('renders the full list as multi-line plain text', () => {
     const topic = formatTasksAsRoomTopic([
-      task('1', 'completed'),
-      task('2', 'completed'),
-      task('3', 'pending'),
+      task('1', 'completed', 'one'),
+      task('2', 'in_progress', 'two', { activeForm: 'Doing two' }),
+      task('3', 'pending', 'three'),
     ])
-    assert.equal(topic, '📋 2/3 done')
+    assert.equal(
+      topic,
+      '📋 Tasks (1/3)\n✅ one\n🟡 two (Doing two)\n⬜ three',
+    )
   })
 
-  it('highlights the in-progress task subject when one exists', () => {
+  it('shows just the header counts when there are no in-progress tasks', () => {
     const topic = formatTasksAsRoomTopic([
-      task('1', 'completed'),
-      task('2', 'in_progress', 'refactor foo'),
-      task('3', 'pending'),
+      task('1', 'completed', 'a'),
+      task('2', 'pending', 'b'),
     ])
-    assert.equal(topic, '📋 1/3 · 🟡 #2 refactor foo')
+    assert.ok(topic?.startsWith('📋 Tasks (1/2)\n'))
+    assert.match(topic ?? '', /✅ a/)
+    assert.match(topic ?? '', /⬜ b/)
   })
 
-  it('picks the first in-progress task when multiple exist', () => {
+  it('skips activeForm for completed tasks even if set', () => {
     const topic = formatTasksAsRoomTopic([
-      task('1', 'in_progress', 'first'),
-      task('2', 'in_progress', 'second'),
+      task('1', 'completed', 'done', { activeForm: 'Doing it' }),
     ])
-    assert.match(topic ?? '', /#1 first/)
+    assert.doesNotMatch(topic ?? '', /Doing it/)
   })
 })
 

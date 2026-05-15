@@ -6,7 +6,7 @@ import type { MatrixClient } from 'matrix-bot-sdk'
 import type Database from 'better-sqlite3'
 import type { Logger } from 'pino'
 import type { Session } from './types.js'
-import { getSessionById } from './database.js'
+import { getSessionById, getConfig, setConfig } from './database.js'
 
 // --- Task data shape ---
 //
@@ -117,20 +117,23 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
   return { body: plainLines.join('\n'), formatted_body: htmlLines.join('') }
 }
 
-/** Compact summary suitable for `m.room.topic`. Topic is sticky room state
- *  visible in the header — shorter is better. Shows the in-progress task's
- *  subject if any, otherwise just the done/total counts. */
+/** Full task list as plain text, suitable for `m.room.topic`. Newlines are
+ *  rendered by Element. Returns null when nothing is visible. */
 export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
   const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
   if (visible.length === 0) return null
 
   const done = visible.filter(t => t.status === 'completed').length
-  const active = visible.find(t => t.status === 'in_progress')
+  const lines: string[] = [`📋 Tasks (${done}/${visible.length})`]
 
-  if (active) {
-    return `📋 ${done}/${visible.length} · 🟡 #${active.id} ${active.subject}`
+  for (const t of visible) {
+    const icon = STATUS_ICON[t.status] ?? '•'
+    const subject = t.subject || `(no subject)`
+    const activeForm = t.status === 'in_progress' && t.activeForm ? ` (${t.activeForm})` : ''
+    lines.push(`${icon} ${subject}${activeForm}`)
   }
-  return `📋 ${done}/${visible.length} done`
+
+  return lines.join('\n')
 }
 
 /** SHA-1 hash of the canonical task state. Used to skip posts when nothing
@@ -219,12 +222,96 @@ async function tick(
   state.lastDigest = digest
 
   const topic = formatTasksAsRoomTopic(tasks)
-  if (topic === null) return
+  const message = formatTasksAsMatrix(tasks)
+  if (topic === null || message === null) return
 
   try {
     await client.sendStateEvent(current.room_id, 'm.room.topic', '', { topic })
-    logger.debug({ session: current.name, topic }, 'task-mirror updated room topic')
   } catch (err) {
     logger.warn({ err, session: current.name }, 'failed to update room topic')
+  }
+
+  await upsertPinnedTaskMessage(client, db, current.room_id, sessionId, message, logger)
+}
+
+const PIN_KEY_PREFIX = 'task_pin_event:'
+
+/** Post a new pinned task message on first call; on subsequent calls edit
+ *  the existing message in place via `m.replace`. Survives supervisor
+ *  restarts because the event id is persisted in the config table. */
+async function upsertPinnedTaskMessage(
+  client: MatrixClient,
+  db: Database.Database,
+  roomId: string,
+  sessionId: string,
+  formatted: { body: string; formatted_body: string },
+  logger: Logger,
+): Promise<void> {
+  const pinKey = `${PIN_KEY_PREFIX}${sessionId}`
+  const existingEventId = getConfig(db, pinKey)
+
+  if (existingEventId) {
+    // Edit-in-place. Body prefix "* " is the canonical fallback for clients
+    // that don't render m.new_content; modern clients show new_content.
+    try {
+      await client.sendMessage(roomId, {
+        msgtype: 'm.text',
+        body: `* ${formatted.body}`,
+        formatted_body: `* ${formatted.formatted_body}`,
+        format: 'org.matrix.custom.html',
+        'm.new_content': {
+          msgtype: 'm.text',
+          body: formatted.body,
+          formatted_body: formatted.formatted_body,
+          format: 'org.matrix.custom.html',
+        },
+        'm.relates_to': {
+          rel_type: 'm.replace',
+          event_id: existingEventId,
+        },
+      })
+      return
+    } catch (err) {
+      logger.warn(
+        { err, sessionId, existingEventId },
+        'task-mirror edit failed — falling back to a new pinned message',
+      )
+      // Fall through to post-new path below.
+    }
+  }
+
+  // First-time post (or fallback after a failed edit).
+  let newEventId: string
+  try {
+    newEventId = await client.sendMessage(roomId, {
+      msgtype: 'm.text',
+      body: formatted.body,
+      formatted_body: formatted.formatted_body,
+      format: 'org.matrix.custom.html',
+    })
+  } catch (err) {
+    logger.warn({ err, sessionId }, 'task-mirror failed to post initial message')
+    return
+  }
+  setConfig(db, pinKey, newEventId)
+
+  // Add to pinned events, preserving anything already pinned.
+  let pinned: string[] = []
+  try {
+    const state = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
+      | { pinned?: unknown } | null
+    if (state && Array.isArray(state.pinned)) {
+      pinned = state.pinned.filter((p): p is string => typeof p === 'string')
+    }
+  } catch {
+    // No existing pinned_events state — that's fine, start fresh.
+  }
+  if (!pinned.includes(newEventId)) {
+    pinned.push(newEventId)
+    try {
+      await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned })
+    } catch (err) {
+      logger.warn({ err, sessionId, newEventId }, 'task-mirror failed to pin message')
+    }
   }
 }
