@@ -88,4 +88,11 @@ describe('isModeCommand', () => {
     assert.equal(isModeCommand('what mode are we in?'), false)
     assert.equal(isModeCommand('change mode please'), false)
   })
+
+  it('matches case variations of the body before the mode keyword', () => {
+    // We deliberately don't case-fold !mode itself — only the argument.
+    // Reasoning: a stricter prefix keeps the intercept surface small.
+    assert.equal(isModeCommand('!Mode auto'), false)
+    assert.equal(isModeCommand('!MODE auto'), false)
+  })
 })

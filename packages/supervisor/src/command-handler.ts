@@ -652,6 +652,18 @@ async function handleNew(
 const MODE_COMMAND_RE = /^!mode(?:\s+(.*))?$/;
 const MODE_LIST_HTML = "default | plan | acceptEdits | auto";
 
+/** Map user input to a canonical UserPermissionMode. Case-insensitive; also
+ *  accepts the shorter alias `edit` / `edits` for `acceptEdits`. Returns null
+ *  for unknown values. */
+function resolveModeAlias(raw: string): UserPermissionMode | null {
+  const lower = raw.toLowerCase();
+  if (lower === "edit" || lower === "edits" || lower === "acceptedits") return "acceptEdits";
+  for (const m of USER_PERMISSION_MODES) {
+    if (m.toLowerCase() === lower) return m;
+  }
+  return null;
+}
+
 /** Cheap sync check used in the message handler to decide whether to
  *  intercept before forwarding to claude. */
 export function isModeCommand(body: string): boolean {
@@ -706,19 +718,18 @@ export async function handleModeCommand(
     return;
   }
 
-  // Validate target
-  if (!(USER_PERMISSION_MODES as readonly string[]).includes(argRaw)) {
+  // Validate target — case-insensitive, with `edit` alias for `acceptEdits`
+  const target = resolveModeAlias(argRaw);
+  if (target === null) {
     await safeSendHtml(
       client,
       roomId,
-      `<i>Unknown mode <code>${escapeHtmlMin(argRaw)}</code>. Valid: ${MODE_LIST_HTML}.</i>`,
+      `<i>Unknown mode <code>${escapeHtmlMin(argRaw)}</code>. Valid: ${MODE_LIST_HTML} (case-insensitive; <code>edit</code> works for <code>acceptEdits</code>).</i>`,
       logger,
       "mode:invalid-arg",
     );
     return;
   }
-
-  const target = argRaw as UserPermissionMode;
 
   if (session.status !== "active") {
     await safeSendHtml(
@@ -732,8 +743,14 @@ export async function handleModeCommand(
   }
 
   const result = await cycleToPermissionMode(session, target, logger);
+
+  // Always sync the DB to whatever we observed, even on failure — the JSONL
+  // is the source of truth and the DB shouldn't drift away from it.
+  if (result.mode && result.mode !== session.permission_mode) {
+    updateSession(db, session.id, { permission_mode: result.mode });
+  }
+
   if (result.ok) {
-    updateSession(db, session.id, { permission_mode: target });
     await safeSendHtml(
       client,
       roomId,
@@ -747,7 +764,7 @@ export async function handleModeCommand(
   await safeSendHtml(
     client,
     roomId,
-    `<i>Couldn't switch to <b>${target}</b>: ${result.reason ?? "unknown reason"}. Current: <b>${result.mode ?? "unknown"}</b>.</i>`,
+    `<i>Couldn't switch to <b>${target}</b>: ${result.reason ?? "unknown reason"}. Current: <b>${result.mode ?? "unknown"}</b>. If this persists, attach to the tmux pane and try Shift+Tab manually.</i>`,
     logger,
     "mode:failed",
   );

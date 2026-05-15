@@ -295,24 +295,31 @@ export async function cycleToPermissionMode(
   }
   if (start === target) return { ok: true, mode: target }
 
-  // Safety cap — claude has 4 known cycle modes; 6 leaves room for one extra
-  // without burning the planet on a misread.
+  // Safety cap — claude has 4 known cycle modes; 6 leaves room for one extra.
   const maxAttempts = 6
-  // 500 ms — generous enough for claude to process the keystroke, update its
-  // own state, and flush the permission-mode JSONL record. We've seen 150 ms
-  // miss the flush in practice.
-  const flushDelayMs = 500
+  // After each Shift+Tab we poll the JSONL up to maxWaitMs, sampling every
+  // pollMs. Short total budget but enough resolution to catch fast flushes;
+  // a slow flush still lands on the next attempt.
+  const maxWaitMs = 2000
+  const pollMs = 100
   const seen: (UserPermissionMode | null)[] = [start]
+  let last: UserPermissionMode | null = start
   for (let i = 0; i < maxAttempts; i++) {
     if (!sendShiftTab(tmuxName, logger)) {
       return { ok: false, mode: readSessionMode(session), reason: 'send-keys failed' }
     }
-    await new Promise(r => setTimeout(r, flushDelayMs))
-    const now = readSessionMode(session)
-    seen.push(now)
-    if (now === target) {
+    const deadline = Date.now() + maxWaitMs
+    let observed: UserPermissionMode | null = last
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, pollMs))
+      observed = readSessionMode(session)
+      if (observed !== null && observed !== last) break  // mode changed → react
+    }
+    seen.push(observed)
+    last = observed
+    if (observed === target) {
       logger.debug(
-        { session: session.name, from: start, to: now, cycles: i + 1 },
+        { session: session.name, from: start, to: observed, cycles: i + 1 },
         'Mode cycled',
       )
       return { ok: true, mode: target }
@@ -321,12 +328,12 @@ export async function cycleToPermissionMode(
 
   logger.warn(
     { session: session.name, target, seen },
-    'cycleToPermissionMode exhausted attempts — diagnose with tmux capture-pane',
+    'cycleToPermissionMode exhausted attempts',
   )
   return {
     ok: false,
-    mode: readSessionMode(session),
-    reason: `cycled ${maxAttempts} times without reaching ${target} (saw: ${seen.join(' → ')})`,
+    mode: last,
+    reason: `cycled ${maxAttempts}× without reaching ${target} (saw: ${seen.join(' → ')})`,
   }
 }
 
