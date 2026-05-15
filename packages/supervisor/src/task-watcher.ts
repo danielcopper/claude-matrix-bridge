@@ -292,6 +292,12 @@ async function clearTaskState(
   sessionId: string,
   logger: Logger,
 ): Promise<void> {
+  const pinKey = `${PIN_KEY_PREFIX}${sessionId}`
+  const existingEventId = getConfig(db, pinKey)
+  // Nothing to clean up — never posted a pin in this room. Don't touch
+  // the topic either; users may have set their own.
+  if (!existingEventId) return
+
   // 1. Blank the topic.
   try {
     await client.sendStateEvent(roomId, 'm.room.topic', '', {
@@ -301,10 +307,6 @@ async function clearTaskState(
   } catch (err) {
     logger.warn({ err, sessionId }, 'task-mirror failed to clear topic')
   }
-
-  const pinKey = `${PIN_KEY_PREFIX}${sessionId}`
-  const existingEventId = getConfig(db, pinKey)
-  if (!existingEventId) return
 
   // 2. Unpin (preserving any user-pinned events).
   try {
