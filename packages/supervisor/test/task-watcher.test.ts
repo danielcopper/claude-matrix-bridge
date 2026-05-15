@@ -7,6 +7,7 @@ import {
   readTasks,
   formatTasksAsMatrix,
   formatTasksAsRoomTopic,
+  formatTasksAsRoomTopicHtml,
   tasksDigest,
   type Task,
 } from '../src/task-watcher.js'
@@ -121,6 +122,36 @@ describe('formatTasksAsRoomTopic', () => {
       task('1', 'completed', 'done', { activeForm: 'Doing it' }),
     ])
     assert.doesNotMatch(topic ?? '', /Doing it/)
+  })
+})
+
+// --- formatTasksAsRoomTopicHtml ---
+
+describe('formatTasksAsRoomTopicHtml', () => {
+  it('returns null when no visible tasks', () => {
+    assert.equal(formatTasksAsRoomTopicHtml([]), null)
+  })
+
+  it('joins items with <br> for MSC3765 line breaks', () => {
+    const html = formatTasksAsRoomTopicHtml([
+      task('1', 'completed', 'one'),
+      task('2', 'pending', 'two'),
+    ])
+    assert.equal(html, '📋 Tasks (1/2)<br>✅ one<br>⬜ two')
+  })
+
+  it('wraps activeForm in <i> for in_progress tasks', () => {
+    const html = formatTasksAsRoomTopicHtml([
+      task('1', 'in_progress', 'do thing', { activeForm: 'Doing thing' }),
+    ])
+    assert.match(html ?? '', /🟡 do thing <i>\(Doing thing\)<\/i>/)
+  })
+
+  it('escapes HTML metacharacters in subjects', () => {
+    const html = formatTasksAsRoomTopicHtml([task('1', 'pending', 'a <script> & "x"')])
+    assert.doesNotMatch(html ?? '', /<script>/)
+    assert.match(html ?? '', /&lt;script&gt;/)
+    assert.match(html ?? '', /&amp;/)
   })
 })
 

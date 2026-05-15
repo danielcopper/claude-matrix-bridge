@@ -121,8 +121,9 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
 }
 
 /** Full task list for `m.room.topic`. One task per line; each item line
- *  starts with a space so Element's chat-start topic notice (which strips
- *  newlines) still renders the items separated. */
+ *  starts with a space so Element X mobile (no MSC3765 support yet)
+ *  separates items even when newlines collapse. Element Web uses the
+ *  paired HTML variant below. */
 export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
   const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
   if (visible.length === 0) return null
@@ -138,6 +139,28 @@ export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
   }
 
   return lines.join('\n')
+}
+
+/** HTML variant for `m.topic` extensible event (MSC3765, stabilized in
+ *  Matrix v1.15, Element Web 1.11.100+). `<br>` is in Element's topic
+ *  sanitizer allow-list, so this produces real line breaks in the room
+ *  header, beginning-of-room notice, and state-change notice. */
+export function formatTasksAsRoomTopicHtml(tasks: Task[]): string | null {
+  const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
+  if (visible.length === 0) return null
+
+  const done = visible.filter(t => t.status === 'completed').length
+  const parts: string[] = [`📋 Tasks (${done}/${visible.length})`]
+
+  for (const t of visible) {
+    const icon = STATUS_ICON[t.status] ?? '•'
+    const subject = escapeHtml(t.subject || '(no subject)')
+    const activeForm = t.status === 'in_progress' && t.activeForm
+      ? ` <i>(${escapeHtml(t.activeForm)})</i>` : ''
+    parts.push(`${icon} ${subject}${activeForm}`)
+  }
+
+  return parts.join('<br>')
 }
 
 /** SHA-1 hash of the canonical task state. Used to skip posts when nothing
@@ -227,11 +250,20 @@ async function tick(
   state.lastDigest = digest
 
   const topic = formatTasksAsRoomTopic(tasks)
+  const topicHtml = formatTasksAsRoomTopicHtml(tasks)
   const message = formatTasksAsMatrix(tasks)
-  if (topic === null || message === null) return
+  if (topic === null || topicHtml === null || message === null) return
 
   try {
-    await client.sendStateEvent(current.room_id, 'm.room.topic', '', { topic })
+    await client.sendStateEvent(current.room_id, 'm.room.topic', '', {
+      topic,
+      'm.topic': {
+        'm.text': [
+          { mimetype: 'text/html', body: topicHtml },
+          { mimetype: 'text/plain', body: topic },
+        ],
+      },
+    })
   } catch (err) {
     logger.warn({ err, session: current.name }, 'failed to update room topic')
   }
