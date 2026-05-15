@@ -231,24 +231,34 @@ async function tick(
     return
   }
 
-  // Cheap pre-check: skip the directory scan if the dir's mtime hasn't moved.
-  const dir = tasksDirFor(sessionId)
-  if (!existsSync(dir)) return
-  let mtimeMs: number
-  try {
-    mtimeMs = statSync(dir).mtimeMs
-  } catch {
-    return
-  }
   const state = watchers.get(sessionId)
   if (!state) return
-  if (mtimeMs === state.lastTaskDirMtime) return
+
+  // Cheap pre-check: skip the full read if the dir's mtime hasn't moved.
+  // Only valid after the first reconciliation — otherwise an empty dir
+  // (mtimeMs=0 == lastTaskDirMtime=0) would skip the initial cleanup
+  // pass when we resume into a state that needs clearing.
+  const dir = tasksDirFor(sessionId)
+  let mtimeMs = 0
+  if (existsSync(dir)) {
+    try {
+      mtimeMs = statSync(dir).mtimeMs
+    } catch {
+      // Permission error — fall through to a fresh read.
+    }
+  }
+  if (state.lastDigest !== null && mtimeMs === state.lastTaskDirMtime) return
   state.lastTaskDirMtime = mtimeMs
 
   const tasks = readTasks(sessionId)
   const digest = tasksDigest(tasks)
   if (digest === state.lastDigest) return
   state.lastDigest = digest
+
+  if (tasks.length === 0) {
+    await clearTaskState(client, db, current.room_id, sessionId, logger)
+    return
+  }
 
   const topic = formatTasksAsRoomTopic(tasks)
   const topicHtml = formatTasksAsRoomTopicHtml(tasks)
@@ -270,6 +280,55 @@ async function tick(
   }
 
   await upsertPinnedTaskMessage(client, db, current.room_id, sessionId, message, logger)
+}
+
+/** Reset the task UI when claude clears the list: blank the topic, unpin
+ *  the task message, redact it from history, and forget the stored event
+ *  id so a fresh tick (with new tasks) posts a new pinned message. */
+async function clearTaskState(
+  client: MatrixClient,
+  db: Database.Database,
+  roomId: string,
+  sessionId: string,
+  logger: Logger,
+): Promise<void> {
+  // 1. Blank the topic.
+  try {
+    await client.sendStateEvent(roomId, 'm.room.topic', '', {
+      topic: '',
+      'm.topic': { 'm.text': [{ mimetype: 'text/plain', body: '' }] },
+    })
+  } catch (err) {
+    logger.warn({ err, sessionId }, 'task-mirror failed to clear topic')
+  }
+
+  const pinKey = `${PIN_KEY_PREFIX}${sessionId}`
+  const existingEventId = getConfig(db, pinKey)
+  if (!existingEventId) return
+
+  // 2. Unpin (preserving any user-pinned events).
+  try {
+    const state = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
+      | { pinned?: unknown } | null
+    if (state && Array.isArray(state.pinned)) {
+      const filtered = state.pinned
+        .filter((p): p is string => typeof p === 'string')
+        .filter(p => p !== existingEventId)
+      await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned: filtered })
+    }
+  } catch (err) {
+    logger.warn({ err, sessionId, existingEventId }, 'task-mirror failed to unpin')
+  }
+
+  // 3. Redact the task message so it disappears from chat history.
+  try {
+    await client.redactEvent(roomId, existingEventId, 'tasks cleared')
+  } catch (err) {
+    logger.warn({ err, sessionId, existingEventId }, 'task-mirror failed to redact')
+  }
+
+  // 4. Forget the event id so the next non-empty tick starts fresh.
+  setConfig(db, pinKey, '')
 }
 
 const PIN_KEY_PREFIX = 'task_pin_event:'
