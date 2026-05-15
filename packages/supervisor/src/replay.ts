@@ -89,6 +89,16 @@ function isLocalUserMessage(r: JsonlRecord): boolean {
   return typeof content === 'string'
 }
 
+function isChannelUserMessage(r: JsonlRecord): boolean {
+  if (r.type !== 'user') return false
+  if (r.origin?.kind !== 'channel') return false
+  const content = r.message?.content
+  if (Array.isArray(content)) {
+    return content.some((b: ContentBlock) => b.type === 'text')
+  }
+  return typeof content === 'string'
+}
+
 function isAssistantText(r: JsonlRecord): boolean {
   if (r.type !== 'assistant') return false
   const content = r.message?.content
@@ -232,6 +242,22 @@ function formatReplayBlock(
 }
 
 // --- Public API ---
+
+export function hasUserActivityFromRecords(records: JsonlRecord[]): boolean {
+  for (const r of records) {
+    if (isLocalUserMessage(r)) return true
+    if (isChannelUserMessage(r)) return true
+    if (isAssistantText(r)) return true
+  }
+  return false
+}
+
+export function hasUserActivity(sessionId: string, workDir: string): boolean {
+  const path = jsonlPath(sessionId, workDir)
+  if (!path) return false
+  const raw = readFileSync(path, 'utf-8')
+  return hasUserActivityFromRecords(parseJsonl(raw))
+}
 
 export function buildReplayFromRecords(
   records: JsonlRecord[],
