@@ -7,7 +7,6 @@ import type Database from 'better-sqlite3'
 import type { Logger } from 'pino'
 import type { Session } from './types.js'
 import { getSessionById } from './database.js'
-import { safeSendMessage } from './matrix-send.js'
 
 // --- Task data shape ---
 //
@@ -118,6 +117,22 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
   return { body: plainLines.join('\n'), formatted_body: htmlLines.join('') }
 }
 
+/** Compact summary suitable for `m.room.topic`. Topic is sticky room state
+ *  visible in the header — shorter is better. Shows the in-progress task's
+ *  subject if any, otherwise just the done/total counts. */
+export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
+  const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
+  if (visible.length === 0) return null
+
+  const done = visible.filter(t => t.status === 'completed').length
+  const active = visible.find(t => t.status === 'in_progress')
+
+  if (active) {
+    return `📋 ${done}/${visible.length} · 🟡 #${active.id} ${active.subject}`
+  }
+  return `📋 ${done}/${visible.length} done`
+}
+
 /** SHA-1 hash of the canonical task state. Used to skip posts when nothing
  *  meaningful changed (e.g. claude touches a file without altering content). */
 export function tasksDigest(tasks: Task[]): string {
@@ -203,19 +218,13 @@ async function tick(
   if (digest === state.lastDigest) return
   state.lastDigest = digest
 
-  const formatted = formatTasksAsMatrix(tasks)
-  if (!formatted) return
+  const topic = formatTasksAsRoomTopic(tasks)
+  if (topic === null) return
 
-  await safeSendMessage(
-    client,
-    current.room_id,
-    {
-      msgtype: 'm.text',
-      body: formatted.body,
-      format: 'org.matrix.custom.html',
-      formatted_body: formatted.formatted_body,
-    },
-    logger,
-    'task-mirror:update',
-  )
+  try {
+    await client.sendStateEvent(current.room_id, 'm.room.topic', '', { topic })
+    logger.debug({ session: current.name, topic }, 'task-mirror updated room topic')
+  } catch (err) {
+    logger.warn({ err, session: current.name }, 'failed to update room topic')
+  }
 }

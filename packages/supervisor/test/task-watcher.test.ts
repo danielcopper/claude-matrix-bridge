@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   readTasks,
   formatTasksAsMatrix,
+  formatTasksAsRoomTopic,
   tasksDigest,
   type Task,
 } from '../src/task-watcher.js'
@@ -81,6 +82,41 @@ describe('formatTasksAsMatrix', () => {
     assert.doesNotMatch(result.formatted_body, /<script>/)
     assert.match(result.formatted_body, /&lt;script&gt;/)
     assert.match(result.formatted_body, /&amp;/)
+  })
+})
+
+// --- formatTasksAsRoomTopic ---
+
+describe('formatTasksAsRoomTopic', () => {
+  it('returns null when no visible tasks', () => {
+    assert.equal(formatTasksAsRoomTopic([]), null)
+    assert.equal(formatTasksAsRoomTopic([task('1', 'deleted')]), null)
+  })
+
+  it('shows just counts when nothing in progress', () => {
+    const topic = formatTasksAsRoomTopic([
+      task('1', 'completed'),
+      task('2', 'completed'),
+      task('3', 'pending'),
+    ])
+    assert.equal(topic, '📋 2/3 done')
+  })
+
+  it('highlights the in-progress task subject when one exists', () => {
+    const topic = formatTasksAsRoomTopic([
+      task('1', 'completed'),
+      task('2', 'in_progress', 'refactor foo'),
+      task('3', 'pending'),
+    ])
+    assert.equal(topic, '📋 1/3 · 🟡 #2 refactor foo')
+  })
+
+  it('picks the first in-progress task when multiple exist', () => {
+    const topic = formatTasksAsRoomTopic([
+      task('1', 'in_progress', 'first'),
+      task('2', 'in_progress', 'second'),
+    ])
+    assert.match(topic ?? '', /#1 first/)
   })
 })
 
