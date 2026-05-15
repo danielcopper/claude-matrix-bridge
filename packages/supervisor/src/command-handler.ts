@@ -354,7 +354,7 @@ async function resumeSession(
     (err) => logger.error({ err, session: session.name }, "SSE connection error"),
     logger,
   );
-  startTaskMirror({ ...updated, status: "active" }, client, db, logger);
+  startTaskMirror({ ...updated, status: "active" }, client, db, config.matrix.botUserId, logger);
 
   if (session.room_id) {
     await client.sendHtmlText(
@@ -628,7 +628,7 @@ async function handleNew(
       (err) => logger.error({ err, session: name }, "SSE connection error"),
       logger,
     );
-    startTaskMirror(active, client, db, logger);
+    startTaskMirror(active, client, db, config.matrix.botUserId, logger);
 
     await client.sendHtmlText(
       roomId,

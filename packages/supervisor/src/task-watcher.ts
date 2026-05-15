@@ -188,6 +188,7 @@ interface WatcherState {
   lastDigest: string | null
   lastTaskDirMtime: number
   pollHandle: ReturnType<typeof setInterval>
+  botUserId: string
 }
 
 const watchers = new Map<string, WatcherState>()
@@ -196,11 +197,15 @@ const POLL_INTERVAL_MS = 750
 
 /** Begin mirroring the session's task list into its Matrix room. Idempotent:
  *  calling again for the same session restarts the watcher. The watcher
- *  self-stops once the session is no longer in the 'active' state. */
+ *  self-stops once the session is no longer in the 'active' state.
+ *
+ *  `botUserId` is used to identify bridge-authored pinned events when we
+ *  clean up `m.room.pinned_events` — see pinnedEventsOwnedByOthers. */
 export function startTaskMirror(
   session: Session,
   client: MatrixClient,
   db: Database.Database,
+  botUserId: string,
   logger: Logger,
 ): void {
   stopTaskMirror(session.id)
@@ -213,6 +218,7 @@ export function startTaskMirror(
   const state: WatcherState = {
     lastDigest: null,
     lastTaskDirMtime: 0,
+    botUserId,
     pollHandle: setInterval(() => {
       void tick(session.id, client, db, logger).catch(err => {
         logger.error({ err, session: session.name }, 'task-mirror tick failed')
@@ -270,7 +276,7 @@ async function tick(
 
   // Soft-deleted tasks stay on disk with status:'deleted'; treat them as gone.
   if (visibleTasks(tasks).length === 0) {
-    await clearTaskState(client, db, current.room_id, sessionId, logger)
+    await clearTaskState(client, db, current.room_id, sessionId, state.botUserId, logger)
     return
   }
 
@@ -293,17 +299,67 @@ async function tick(
     logger.warn({ err, session: current.name }, 'failed to update room topic')
   }
 
-  await upsertPinnedTaskMessage(client, db, current.room_id, sessionId, message, logger)
+  await upsertPinnedTaskMessage(client, db, current.room_id, sessionId, state.botUserId, message, logger)
 }
 
-/** Reset the task UI when claude clears the list: blank the topic, unpin
- *  the task message, redact it from history, and forget the stored event
- *  id so a fresh tick (with new tasks) posts a new pinned message. */
+/** Read the current `m.room.pinned_events` and return only those event ids
+ *  whose author is someone other than the bot. Used to clean up bridge-
+ *  authored pins while preserving anything the user pinned themselves
+ *  (and any stale bridge entries that got orphaned across older buggy
+ *  code paths — self-healing). */
+async function pinnedEventsOwnedByOthers(
+  client: MatrixClient,
+  roomId: string,
+  botUserId: string,
+  logger: Logger,
+): Promise<string[]> {
+  let pinnedList: unknown
+  try {
+    const raw = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
+      | { pinned?: unknown; content?: { pinned?: unknown } } | null
+    pinnedList = raw && 'pinned' in raw ? raw.pinned : raw?.content?.pinned
+  } catch {
+    // No pinned_events state event at all → nothing to filter.
+    return []
+  }
+  if (!Array.isArray(pinnedList)) return []
+
+  const result: string[] = []
+  for (const id of pinnedList) {
+    if (typeof id !== 'string') continue
+    let sender: string | undefined
+    try {
+      const event = await client.getEvent(roomId, id) as { sender?: string }
+      sender = event.sender
+    } catch (err) {
+      // Can't read the event (deleted by server policy, etc.). Keep it
+      // to be safe — better to leave one stale entry than to drop a
+      // real user pin we can't verify.
+      logger.debug({ err, roomId, eventId: id }, 'pinned event unreadable; preserving')
+      result.push(id)
+      continue
+    }
+    if (sender && sender !== botUserId) {
+      result.push(id)
+    }
+    // sender === botUserId → drop (it's ours, current or stale)
+  }
+  return result
+}
+
+/** Reset the task UI when claude clears the list: blank the topic and
+ *  remove all bridge-authored entries from `m.room.pinned_events` (user
+ *  pins stay), then forget the stored event id. We do NOT redact the
+ *  original message — that produces a "Nachricht gelöscht" timeline
+ *  notice whose ordering against new messages is unpredictable. The
+ *  unpin alone makes the banner empty; the old message stays in chat
+ *  history as a snapshot of past state. */
 async function clearTaskState(
   client: MatrixClient,
   db: Database.Database,
   roomId: string,
   sessionId: string,
+  botUserId: string,
   logger: Logger,
 ): Promise<void> {
   const pinKey = `${PIN_KEY_PREFIX}${sessionId}`
@@ -322,43 +378,16 @@ async function clearTaskState(
     logger.warn({ err, sessionId }, 'task-mirror failed to clear topic')
   }
 
-  // 2. Unpin. Try to preserve any user-pinned events, but if we can't read
-  //    the current state (404, sdk quirk, etc.) we still need to remove our
-  //    pin or the banner stays stale. Falls back to writing pinned:[] so
-  //    the bot's pin definitely goes away — at the cost of losing any
-  //    user-pinned events the bridge couldn't observe.
-  let pinned: string[] = []
-  let readOk = false
+  // 2. Unpin: keep only non-bot entries. Self-heals accumulated stale
+  //    bridge pins from earlier buggy code paths.
+  const keepPinned = await pinnedEventsOwnedByOthers(client, roomId, botUserId, logger)
   try {
-    const raw = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
-      | { pinned?: unknown; content?: { pinned?: unknown } } | null
-    // Some sdk paths return the content directly; others may nest it.
-    const list = (raw && 'pinned' in raw ? raw.pinned : raw?.content?.pinned) ?? []
-    if (Array.isArray(list)) {
-      pinned = list.filter((p): p is string => typeof p === 'string' && p !== existingEventId)
-      readOk = true
-    }
+    await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned: keepPinned })
   } catch (err) {
-    logger.warn({ err, sessionId, existingEventId }, 'task-mirror could not read pinned_events; will overwrite with empty list')
-  }
-  if (!readOk) {
-    // Reading failed: pinned stays as []. Anything the user had pinned is
-    // collateral damage — accepted in exchange for the bot's pin really going.
-  }
-  try {
-    await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned })
-  } catch (err) {
-    logger.warn({ err, sessionId, existingEventId, pinned }, 'task-mirror failed to write pinned_events')
+    logger.warn({ err, sessionId, existingEventId, keepPinned }, 'task-mirror failed to write pinned_events')
   }
 
-  // 3. Redact the task message so it disappears from chat history.
-  try {
-    await client.redactEvent(roomId, existingEventId, 'tasks cleared')
-  } catch (err) {
-    logger.warn({ err, sessionId, existingEventId }, 'task-mirror failed to redact')
-  }
-
-  // 4. Forget the event id so the next non-empty tick starts fresh.
+  // 3. Forget the event id so the next non-empty tick starts fresh.
   setConfig(db, pinKey, '')
 }
 
@@ -372,6 +401,7 @@ async function upsertPinnedTaskMessage(
   db: Database.Database,
   roomId: string,
   sessionId: string,
+  botUserId: string,
   formatted: { body: string; formatted_body: string },
   logger: Logger,
 ): Promise<void> {
@@ -423,23 +453,14 @@ async function upsertPinnedTaskMessage(
   }
   setConfig(db, pinKey, newEventId)
 
-  // Add to pinned events, preserving anything already pinned.
-  let pinned: string[] = []
+  // Pin: drop any stale bridge-authored entries, keep user pins, then add
+  // our new one. This self-heals accumulated bridge pins from earlier
+  // buggy code paths without clobbering events the user pinned manually.
+  const keepPinned = await pinnedEventsOwnedByOthers(client, roomId, botUserId, logger)
+  const pinned = [...keepPinned, newEventId]
   try {
-    const state = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
-      | { pinned?: unknown } | null
-    if (state && Array.isArray(state.pinned)) {
-      pinned = state.pinned.filter((p): p is string => typeof p === 'string')
-    }
-  } catch {
-    // No existing pinned_events state — that's fine, start fresh.
-  }
-  if (!pinned.includes(newEventId)) {
-    pinned.push(newEventId)
-    try {
-      await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned })
-    } catch (err) {
-      logger.warn({ err, sessionId, newEventId }, 'task-mirror failed to pin message')
-    }
+    await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned })
+  } catch (err) {
+    logger.warn({ err, sessionId, newEventId, pinned }, 'task-mirror failed to pin message')
   }
 }

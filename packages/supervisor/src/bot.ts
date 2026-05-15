@@ -460,7 +460,7 @@ async function autoAttachSession(
     (err) => logger.error({ err, session: session.name }, 'SSE connection error'),
     logger,
   )
-  startTaskMirror({ ...updated, status: 'active' }, client, db, logger)
+  startTaskMirror({ ...updated, status: 'active' }, client, db, config.matrix.botUserId, logger)
 
   // Post replay of local activity before resuming Matrix conversation
   if (wasLocal) {

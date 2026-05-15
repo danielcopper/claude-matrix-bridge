@@ -137,7 +137,7 @@ if (activeSessions.length > 0) {
           (err) => logger.error({ err, session: active.name }, 'SSE connection error'),
           logger,
         )
-        startTaskMirror(active, client, db, logger)
+        startTaskMirror(active, client, db, config.matrix.botUserId, logger)
         logger.info({ session: active.name, port }, 'Session restored')
         if (session.room_id) {
           await client.sendText(session.room_id, 'Session restored after supervisor restart.')
