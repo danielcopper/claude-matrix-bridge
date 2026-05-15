@@ -9,11 +9,48 @@ import {
   formatTasksAsRoomTopic,
   formatTasksAsRoomTopicHtml,
   tasksDigest,
+  visibleTasks,
   type Task,
 } from '../src/task-watcher.js'
 
 // Override the tasks dir for tests by symlinking — but readTasks resolves
 // against $HOME/.claude/tasks. Easier: run each test against a temp HOME.
+
+// --- visibleTasks ---
+
+describe('visibleTasks', () => {
+  it('returns all tasks with pending/in_progress/completed status', () => {
+    const tasks = [
+      task('1', 'pending'),
+      task('2', 'in_progress'),
+      task('3', 'completed'),
+    ]
+    assert.equal(visibleTasks(tasks).length, 3)
+  })
+
+  it('excludes soft-deleted tasks (status:"deleted")', () => {
+    const tasks = [
+      task('1', 'pending'),
+      task('2', 'deleted'),
+      task('3', 'completed'),
+    ]
+    assert.deepEqual(visibleTasks(tasks).map(t => t.id), ['1', '3'])
+  })
+
+  it('returns empty when all tasks are deleted (Bug #1 — claude soft-delete)', () => {
+    const tasks = [
+      task('1', 'deleted'),
+      task('2', 'deleted'),
+      task('3', 'deleted'),
+    ]
+    assert.equal(visibleTasks(tasks).length, 0)
+  })
+
+  it('excludes unknown statuses defensively', () => {
+    const tasks = [task('1', 'pending'), task('2', 'cancelled')]
+    assert.deepEqual(visibleTasks(tasks).map(t => t.id), ['1'])
+  })
+})
 
 // --- formatTasksAsMatrix ---
 

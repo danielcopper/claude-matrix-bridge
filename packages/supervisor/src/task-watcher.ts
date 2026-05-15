@@ -80,6 +80,17 @@ const STATUS_ICON: Record<string, string> = {
   pending: '⬜',
 }
 
+/** The statuses we surface in Matrix. Anything else (notably 'deleted', which
+ *  is a soft-delete claude writes to the file rather than removing it) is
+ *  treated as gone. */
+function isVisibleStatus(s: string): boolean {
+  return s === 'pending' || s === 'in_progress' || s === 'completed'
+}
+
+export function visibleTasks(tasks: Task[]): Task[] {
+  return tasks.filter(t => isVisibleStatus(t.status))
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
@@ -93,7 +104,7 @@ function escapeHtml(s: string): string {
  *  banner. `<br>` works because the visible characters are preserved
  *  between line breaks. */
 export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_body: string } | null {
-  const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
+  const visible = visibleTasks(tasks)
   if (visible.length === 0) return null
 
   const done = visible.filter(t => t.status === 'completed').length
@@ -126,7 +137,7 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
  *  separates items even when newlines collapse. Element Web uses the
  *  paired HTML variant below. */
 export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
-  const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
+  const visible = visibleTasks(tasks)
   if (visible.length === 0) return null
 
   const done = visible.filter(t => t.status === 'completed').length
@@ -147,7 +158,7 @@ export function formatTasksAsRoomTopic(tasks: Task[]): string | null {
  *  sanitizer allow-list, so this produces real line breaks in the room
  *  header, beginning-of-room notice, and state-change notice. */
 export function formatTasksAsRoomTopicHtml(tasks: Task[]): string | null {
-  const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
+  const visible = visibleTasks(tasks)
   if (visible.length === 0) return null
 
   const done = visible.filter(t => t.status === 'completed').length
@@ -251,11 +262,14 @@ async function tick(
   state.lastTaskDirMtime = mtimeMs
 
   const tasks = readTasks(sessionId)
+  // Digest over ALL tasks (including deleted) so a status flip to 'deleted'
+  // triggers reconciliation. The visibility filter happens after.
   const digest = tasksDigest(tasks)
   if (digest === state.lastDigest) return
   state.lastDigest = digest
 
-  if (tasks.length === 0) {
+  // Soft-deleted tasks stay on disk with status:'deleted'; treat them as gone.
+  if (visibleTasks(tasks).length === 0) {
     await clearTaskState(client, db, current.room_id, sessionId, logger)
     return
   }
@@ -308,18 +322,33 @@ async function clearTaskState(
     logger.warn({ err, sessionId }, 'task-mirror failed to clear topic')
   }
 
-  // 2. Unpin (preserving any user-pinned events).
+  // 2. Unpin. Try to preserve any user-pinned events, but if we can't read
+  //    the current state (404, sdk quirk, etc.) we still need to remove our
+  //    pin or the banner stays stale. Falls back to writing pinned:[] so
+  //    the bot's pin definitely goes away — at the cost of losing any
+  //    user-pinned events the bridge couldn't observe.
+  let pinned: string[] = []
+  let readOk = false
   try {
-    const state = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
-      | { pinned?: unknown } | null
-    if (state && Array.isArray(state.pinned)) {
-      const filtered = state.pinned
-        .filter((p): p is string => typeof p === 'string')
-        .filter(p => p !== existingEventId)
-      await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned: filtered })
+    const raw = await client.getRoomStateEvent(roomId, 'm.room.pinned_events', '') as
+      | { pinned?: unknown; content?: { pinned?: unknown } } | null
+    // Some sdk paths return the content directly; others may nest it.
+    const list = (raw && 'pinned' in raw ? raw.pinned : raw?.content?.pinned) ?? []
+    if (Array.isArray(list)) {
+      pinned = list.filter((p): p is string => typeof p === 'string' && p !== existingEventId)
+      readOk = true
     }
   } catch (err) {
-    logger.warn({ err, sessionId, existingEventId }, 'task-mirror failed to unpin')
+    logger.warn({ err, sessionId, existingEventId }, 'task-mirror could not read pinned_events; will overwrite with empty list')
+  }
+  if (!readOk) {
+    // Reading failed: pinned stays as []. Anything the user had pinned is
+    // collateral damage — accepted in exchange for the bot's pin really going.
+  }
+  try {
+    await client.sendStateEvent(roomId, 'm.room.pinned_events', '', { pinned })
+  } catch (err) {
+    logger.warn({ err, sessionId, existingEventId, pinned }, 'task-mirror failed to write pinned_events')
   }
 
   // 3. Redact the task message so it disappears from chat history.
