@@ -63,8 +63,11 @@ describe('formatTasksAsMatrix', () => {
     assert.ok(result)
     assert.match(result.formatted_body, /<s>done<\/s>/)
     assert.match(result.formatted_body, /<b>doing<\/b>/)
-    // pending is plain — appears un-wrapped
-    assert.match(result.formatted_body, /#3 todo<\/li>/)
+    // Items are <br>-separated so pin previews keep visible spacing when
+    // tags get stripped.
+    assert.match(result.formatted_body, /<br>/)
+    // pending subject is plain (no strikethrough or bold around it)
+    assert.match(result.formatted_body, /#3 todo$/)
   })
 
   it('appends activeForm only for in_progress tasks', () => {

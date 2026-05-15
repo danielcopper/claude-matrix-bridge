@@ -87,9 +87,11 @@ function escapeHtml(s: string): string {
 /** Format the current task set as a Matrix message. Returns null if there
  *  are no tasks at all (nothing to post).
  *
- *  Body lines start with a space because Element strips newlines in pin
- *  previews and topic state-change notices — the leading space keeps items
- *  visually separated even when collapsed to one line. */
+ *  Body and formatted_body both join items with `<br>` / newlines. Element's
+ *  pin-preview banner strips tags without inserting separators between
+ *  block-level elements, so `<ul><li>` produced run-together text in the
+ *  banner. `<br>` works because the visible characters are preserved
+ *  between line breaks. */
 export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_body: string } | null {
   const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
   if (visible.length === 0) return null
@@ -98,7 +100,7 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
   const header = `📋 Tasks (${visible.length} total, ${done} done)`
 
   const plainLines: string[] = [header]
-  const htmlLines: string[] = [`<p><b>${escapeHtml(header)}</b></p>`, '<ul>']
+  const htmlLines: string[] = [`<b>${escapeHtml(header)}</b>`]
 
   for (const t of visible) {
     const icon = STATUS_ICON[t.status] ?? '•'
@@ -113,11 +115,10 @@ export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_bo
       t.status === 'completed' ? `<s>${subjectHtml}</s>` :
       t.status === 'in_progress' ? `<b>${subjectHtml}</b>` :
       subjectHtml
-    htmlLines.push(`<li>${icon} #${escapeHtml(t.id)} ${wrapped}${activeFormHtml}</li>`)
+    htmlLines.push(`${icon} #${escapeHtml(t.id)} ${wrapped}${activeFormHtml}`)
   }
-  htmlLines.push('</ul>')
 
-  return { body: plainLines.join('\n'), formatted_body: htmlLines.join('') }
+  return { body: plainLines.join('\n'), formatted_body: htmlLines.join('<br>') }
 }
 
 /** Full task list for `m.room.topic`. One task per line; each item line
