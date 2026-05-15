@@ -1,0 +1,221 @@
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { createHash } from 'node:crypto'
+import type { MatrixClient } from 'matrix-bot-sdk'
+import type Database from 'better-sqlite3'
+import type { Logger } from 'pino'
+import type { Session } from './types.js'
+import { getSessionById } from './database.js'
+import { safeSendMessage } from './matrix-send.js'
+
+// --- Task data shape ---
+//
+// Claude Code persists each task as a single JSON file under
+// ~/.claude/tasks/<sessionId>/<taskId>.json. We mirror the current set of
+// tasks into the corresponding Matrix session room whenever it changes.
+
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | string
+
+export interface Task {
+  id: string
+  subject: string
+  description?: string
+  activeForm?: string
+  status: TaskStatus
+  blocks?: string[]
+  blockedBy?: string[]
+}
+
+/** Resolve lazily so HOME-override-style tests work. */
+export function tasksDirFor(sessionId: string): string {
+  return join(homedir(), '.claude', 'tasks', sessionId)
+}
+
+/** Read all task files for a session, sorted by numeric id. Returns an empty
+ *  array if the directory doesn't exist or no readable tasks are present. */
+export function readTasks(sessionId: string): Task[] {
+  const dir = tasksDirFor(sessionId)
+  if (!existsSync(dir)) return []
+
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return []
+  }
+
+  const tasks: Task[] = []
+  for (const entry of entries) {
+    if (!entry.endsWith('.json') || entry.startsWith('.')) continue
+    const path = join(dir, entry)
+    let raw: string
+    try {
+      raw = readFileSync(path, 'utf-8')
+    } catch {
+      continue
+    }
+    try {
+      const parsed = JSON.parse(raw) as Task
+      if (typeof parsed.id === 'string' && typeof parsed.status === 'string') {
+        tasks.push(parsed)
+      }
+    } catch {
+      // Mid-write partial file — skip; we'll catch it on the next poll.
+    }
+  }
+
+  return tasks.sort((a, b) => {
+    const an = Number(a.id)
+    const bn = Number(b.id)
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn
+    return a.id.localeCompare(b.id)
+  })
+}
+
+// --- Formatting ---
+
+const STATUS_ICON: Record<string, string> = {
+  completed: '✅',
+  in_progress: '🟡',
+  pending: '⬜',
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Format the current task set as a Matrix message. Returns null if there
+ *  are no tasks at all (nothing to post). */
+export function formatTasksAsMatrix(tasks: Task[]): { body: string; formatted_body: string } | null {
+  // Hide deleted/unknown statuses — claude treats those as gone.
+  const visible = tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed')
+  if (visible.length === 0) return null
+
+  const done = visible.filter(t => t.status === 'completed').length
+  const header = `📋 Tasks (${visible.length} total, ${done} done)`
+
+  const plainLines: string[] = [header]
+  const htmlLines: string[] = [`<p><b>${escapeHtml(header)}</b></p>`, '<ul>']
+
+  for (const t of visible) {
+    const icon = STATUS_ICON[t.status] ?? '•'
+    const subject = t.subject || `(no subject)`
+    const activeForm = t.status === 'in_progress' && t.activeForm ? ` (${t.activeForm})` : ''
+
+    plainLines.push(`${icon} #${t.id} ${subject}${activeForm}`)
+
+    const subjectHtml = escapeHtml(subject)
+    const activeFormHtml = activeForm ? ` <i>${escapeHtml(activeForm.trim())}</i>` : ''
+    const wrapped =
+      t.status === 'completed' ? `<s>${subjectHtml}</s>` :
+      t.status === 'in_progress' ? `<b>${subjectHtml}</b>` :
+      subjectHtml
+    htmlLines.push(`<li>${icon} #${escapeHtml(t.id)} ${wrapped}${activeFormHtml}</li>`)
+  }
+  htmlLines.push('</ul>')
+
+  return { body: plainLines.join('\n'), formatted_body: htmlLines.join('') }
+}
+
+/** SHA-1 hash of the canonical task state. Used to skip posts when nothing
+ *  meaningful changed (e.g. claude touches a file without altering content). */
+export function tasksDigest(tasks: Task[]): string {
+  const canonical = tasks.map(t => `${t.id}|${t.status}|${t.subject ?? ''}|${t.activeForm ?? ''}`).join('\n')
+  return createHash('sha1').update(canonical).digest('hex')
+}
+
+// --- Live polling ---
+
+interface WatcherState {
+  lastDigest: string | null
+  lastTaskDirMtime: number
+  pollHandle: ReturnType<typeof setInterval>
+}
+
+const watchers = new Map<string, WatcherState>()
+
+const POLL_INTERVAL_MS = 750
+
+/** Begin mirroring the session's task list into its Matrix room. Idempotent:
+ *  calling again for the same session restarts the watcher. The watcher
+ *  self-stops once the session is no longer in the 'active' state. */
+export function startTaskMirror(
+  session: Session,
+  client: MatrixClient,
+  db: Database.Database,
+  logger: Logger,
+): void {
+  stopTaskMirror(session.id)
+  if (!session.room_id) return
+
+  // Seed the digest with the current state so we don't spam the room on
+  // attach with the same task list that's already there from a prior post.
+  const seed = readTasks(session.id)
+  const state: WatcherState = {
+    lastDigest: seed.length > 0 ? tasksDigest(seed) : null,
+    lastTaskDirMtime: 0,
+    pollHandle: setInterval(() => {
+      void tick(session.id, client, db, logger).catch(err => {
+        logger.error({ err, session: session.name }, 'task-mirror tick failed')
+      })
+    }, POLL_INTERVAL_MS),
+  }
+  watchers.set(session.id, state)
+}
+
+export function stopTaskMirror(sessionId: string): void {
+  const w = watchers.get(sessionId)
+  if (!w) return
+  clearInterval(w.pollHandle)
+  watchers.delete(sessionId)
+}
+
+async function tick(
+  sessionId: string,
+  client: MatrixClient,
+  db: Database.Database,
+  logger: Logger,
+): Promise<void> {
+  // Self-heal: if the session is no longer active, stop watching.
+  const current = getSessionById(db, sessionId)
+  if (!current || current.status !== 'active' || !current.room_id) {
+    stopTaskMirror(sessionId)
+    return
+  }
+
+  // Cheap pre-check: skip the directory scan if the dir's mtime hasn't moved.
+  const dir = tasksDirFor(sessionId)
+  if (!existsSync(dir)) return
+  let mtimeMs: number
+  try {
+    mtimeMs = statSync(dir).mtimeMs
+  } catch {
+    return
+  }
+  const state = watchers.get(sessionId)
+  if (!state) return
+  if (mtimeMs === state.lastTaskDirMtime) return
+  state.lastTaskDirMtime = mtimeMs
+
+  const tasks = readTasks(sessionId)
+  const digest = tasksDigest(tasks)
+  if (digest === state.lastDigest) return
+  state.lastDigest = digest
+
+  const formatted = formatTasksAsMatrix(tasks)
+  if (!formatted) return
+
+  await safeSendMessage(
+    client,
+    current.room_id,
+    {
+      msgtype: 'm.text',
+      body: formatted.body,
+      format: 'org.matrix.custom.html',
+      formatted_body: formatted.formatted_body,
+    },
+    logger,
+    'task-mirror:update',
+  )
+}

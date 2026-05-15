@@ -24,6 +24,7 @@ import { spawnClaude, killClaude } from './process-manager.js'
 import { handleCommand, isModeCommand, handleModeCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 import { buildReplay } from './replay.js'
+import { startTaskMirror } from './task-watcher.js'
 import {
   safeSendText,
   safeSendHtml,
@@ -459,6 +460,7 @@ async function autoAttachSession(
     (err) => logger.error({ err, session: session.name }, 'SSE connection error'),
     logger,
   )
+  startTaskMirror({ ...updated, status: 'active' }, client, db, logger)
 
   // Post replay of local activity before resuming Matrix conversation
   if (wasLocal) {

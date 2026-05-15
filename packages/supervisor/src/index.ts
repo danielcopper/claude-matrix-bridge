@@ -14,6 +14,7 @@ import { checkRelayRegistered, spawnClaude, killClaude, killAllProcesses, killTm
 import { waitForHealth, connectSSE } from './relay-client.js'
 import { startApiServer } from './api.js'
 import { hasUserActivity } from './replay.js'
+import { startTaskMirror } from './task-watcher.js'
 
 const config = loadConfig()
 
@@ -136,6 +137,7 @@ if (activeSessions.length > 0) {
           (err) => logger.error({ err, session: active.name }, 'SSE connection error'),
           logger,
         )
+        startTaskMirror(active, client, db, logger)
         logger.info({ session: active.name, port }, 'Session restored')
         if (session.room_id) {
           await client.sendText(session.room_id, 'Session restored after supervisor restart.')

@@ -22,6 +22,7 @@ import {
 } from "./database.js";
 import { spawnClaude, killClaude, readLivePermissionMode, cycleToPermissionMode } from "./process-manager.js";
 import { safeSendHtml } from "./matrix-send.js";
+import { startTaskMirror } from "./task-watcher.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
 import { handleSSEEvent } from "./bot.js";
 import { scanSessions } from "./session-scanner.js";
@@ -353,6 +354,7 @@ async function resumeSession(
     (err) => logger.error({ err, session: session.name }, "SSE connection error"),
     logger,
   );
+  startTaskMirror({ ...updated, status: "active" }, client, db, logger);
 
   if (session.room_id) {
     await client.sendHtmlText(
@@ -626,6 +628,7 @@ async function handleNew(
       (err) => logger.error({ err, session: name }, "SSE connection error"),
       logger,
     );
+    startTaskMirror(active, client, db, logger);
 
     await client.sendHtmlText(
       roomId,
