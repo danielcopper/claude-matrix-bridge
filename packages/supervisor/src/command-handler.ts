@@ -20,7 +20,7 @@ import {
   nextFreePort,
   releasePort,
 } from "./database.js";
-import { spawnClaude, killClaude, readPermissionMode, cycleToPermissionMode } from "./process-manager.js";
+import { spawnClaude, killClaude, readLivePermissionMode, cycleToPermissionMode } from "./process-manager.js";
 import { safeSendHtml } from "./matrix-send.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
 import { handleSSEEvent } from "./bot.js";
@@ -697,7 +697,7 @@ export async function handleModeCommand(
       );
       return;
     }
-    const current = readPermissionMode(session.id, session.working_directory);
+    const current = readLivePermissionMode(session);
     if (current === null) {
       await safeSendHtml(
         client,
