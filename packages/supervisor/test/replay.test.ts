@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   parseJsonl,
   buildReplayFromRecords,
+  hasUserActivityFromRecords,
   type JsonlRecord,
 } from '../src/replay.js'
 
@@ -481,5 +482,59 @@ describe('edge cases', () => {
     // Should be a single pair: tool_result must not reset pendingUser
     assert.ok(result.body.includes('do it'))
     assert.ok(result.body.includes('All done.'))
+  })
+})
+
+// --- hasUserActivityFromRecords ---
+
+describe('hasUserActivityFromRecords', () => {
+  it('returns false for empty records', () => {
+    assert.equal(hasUserActivityFromRecords([]), false)
+  })
+
+  it('returns false for meta-only JSONL (just-spawned, never messaged)', () => {
+    assert.equal(hasUserActivityFromRecords([metaRecord(), metaRecord()]), false)
+  })
+
+  it('returns true on a channel user message even without an assistant reply', () => {
+    // A channel record only exists if a Matrix message was actually delivered —
+    // archiving on this would drop the pending message on supervisor recovery.
+    assert.equal(hasUserActivityFromRecords([channelRecord('hi from matrix')]), true)
+  })
+
+  it('returns true on a local user message', () => {
+    assert.equal(hasUserActivityFromRecords([userRecord('hello')]), true)
+  })
+
+  it('returns true on an assistant text response (e.g. greeting before user)', () => {
+    assert.equal(hasUserActivityFromRecords([assistantText('Hi there')]), true)
+  })
+
+  it('returns true on a full local pair', () => {
+    assert.equal(hasUserActivityFromRecords(simplePair('hi', 'hello')), true)
+  })
+
+  it('returns true on a channel user message followed by an assistant text', () => {
+    assert.equal(
+      hasUserActivityFromRecords([channelRecord('matrix msg'), assistantText('reply')]),
+      true,
+    )
+  })
+
+  it('ignores assistant tool-only messages without text content', () => {
+    const toolOnly: JsonlRecord = {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/a' } }],
+      },
+    }
+    assert.equal(hasUserActivityFromRecords([toolOnly]), false)
+  })
+
+  it('short-circuits on the first real record', () => {
+    // Conceptual check: a mix of meta + one real user message returns true.
+    const records: JsonlRecord[] = [metaRecord(), metaRecord(), userRecord('go')]
+    assert.equal(hasUserActivityFromRecords(records), true)
   })
 })

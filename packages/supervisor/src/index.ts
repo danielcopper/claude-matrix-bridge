@@ -13,6 +13,7 @@ import { createBot, bootstrapSpaceAndRooms, setupEventHandlers, handleSSEEvent }
 import { checkRelayRegistered, spawnClaude, killClaude, killAllProcesses, killTmuxServer } from './process-manager.js'
 import { waitForHealth, connectSSE } from './relay-client.js'
 import { startApiServer } from './api.js'
+import { hasUserActivity } from './replay.js'
 
 const config = loadConfig()
 
@@ -91,6 +92,17 @@ const activeSessions = getActiveSessions(db)
 if (activeSessions.length > 0) {
   logger.info({ count: activeSessions.length }, 'Restoring active sessions')
   for (const session of activeSessions) {
+    // Skip sessions whose JSONL has no real turns — claude --resume would die
+    // seconds after spawn on an effectively-empty session. See #22.
+    if (!hasUserActivity(session.id, session.working_directory)) {
+      updateSession(db, session.id, { status: 'archived', pid: null, port: null })
+      logger.info(
+        { session: session.name },
+        'Archived empty session on recovery (no JSONL activity)',
+      )
+      continue
+    }
+
     // Allocate a fresh port to avoid conflicts from stale DB state
     const port = nextFreePort(db, config.ports.start, config.ports.end)
     if (!port) {
