@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join, basename as pathBasename } from 'node:path'
 import { homedir } from 'node:os'
+import type { PermissionMode } from './types.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
@@ -12,6 +13,8 @@ export interface JsonlRecord {
   isMeta?: boolean
   origin?: { kind?: string }
   timestamp?: string
+  /** Present on `type:"permission-mode"` records (and on user turns). */
+  permissionMode?: string
 }
 
 export interface ContentBlock {
@@ -242,6 +245,38 @@ function formatReplayBlock(
 }
 
 // --- Public API ---
+
+const KNOWN_PERMISSION_MODES: readonly PermissionMode[] = [
+  'default',
+  'plan',
+  'acceptEdits',
+  'auto',
+  'bypassPermissions',
+]
+
+/** Walk records from the end and return the most recent permission-mode value
+ *  claude wrote. Claude emits `{type:"permission-mode", permissionMode:"..."}`
+ *  records on every Tab/Shift-Tab cycle — this is the canonical "current
+ *  mode" source of truth, more reliable than scraping the TUI. */
+export function readPermissionModeFromRecords(records: JsonlRecord[]): PermissionMode | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i]!
+    if (r.type !== 'permission-mode') continue
+    const mode = r.permissionMode
+    if (typeof mode !== 'string') continue
+    if ((KNOWN_PERMISSION_MODES as readonly string[]).includes(mode)) {
+      return mode as PermissionMode
+    }
+  }
+  return null
+}
+
+export function readPermissionMode(sessionId: string, workDir: string): PermissionMode | null {
+  const path = jsonlPath(sessionId, workDir)
+  if (!path) return null
+  const raw = readFileSync(path, 'utf-8')
+  return readPermissionModeFromRecords(parseJsonl(raw))
+}
 
 export function hasUserActivityFromRecords(records: JsonlRecord[]): boolean {
   for (const r of records) {

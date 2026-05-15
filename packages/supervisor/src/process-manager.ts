@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import type { Logger } from 'pino'
 import type Database from 'better-sqlite3'
-import type { Session } from './types.js'
+import type { Session, UserPermissionMode } from './types.js'
 import { updateSession, expireSessionPermissions } from './database.js'
 
 /**
@@ -102,6 +102,11 @@ export function spawnClaude(
 
   if (session.permission_mode === 'bypassPermissions') {
     claudeArgs.push('--dangerously-skip-permissions')
+  } else {
+    // Always pass --permission-mode (even for 'default') so claude doesn't
+    // inherit a stale mode from the JSONL's last permission-mode record on
+    // resume. The DB is authoritative; this keeps the two in sync.
+    claudeArgs.push('--permission-mode', session.permission_mode)
   }
 
   // Construct the full command string for tmux
@@ -244,6 +249,119 @@ export function spawnClaude(
 }
 
 const exitPollers = new Map<string, ReturnType<typeof setInterval>>()
+
+// --- Permission-mode runtime control ---
+//
+// Claude's TUI cycles permission modes on Shift+Tab. There is no IPC, and
+// the session JSONL is NOT updated on cycles (only on spawn/resume) — we
+// verified empirically that 6 cycles in a row produce no JSONL records.
+// So we read the mode from the visible TUI via `tmux capture-pane`.
+//
+// Markers below were verified against claude 2.1.142. The marker line is at
+// the bottom of the pane; absence of any marker means default mode (claude
+// only displays "(shift+tab to cycle)" for non-default modes).
+
+const MODE_PANE_MARKERS: Record<Exclude<UserPermissionMode, 'default'>, string> = {
+  plan: 'plan mode on',
+  acceptEdits: 'accept edits on',
+  auto: 'auto mode on',
+}
+
+function capturePaneText(tmuxName: string): string | null {
+  try {
+    return execFileSync('tmux', tmuxArgs('capture-pane', '-t', tmuxName, '-p'), {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+  } catch {
+    return null
+  }
+}
+
+/** Read the current permission mode from the live TUI. Returns null only if
+ *  the pane can't be captured (tmux session gone). */
+export function readLivePermissionMode(session: Session): UserPermissionMode | null {
+  const pane = capturePaneText(tmuxSessionName(session))
+  if (pane === null) return null
+  const lower = pane.toLowerCase()
+  for (const [mode, marker] of Object.entries(MODE_PANE_MARKERS)) {
+    if (lower.includes(marker)) return mode as UserPermissionMode
+  }
+  return 'default'
+}
+
+/** Send Shift+Tab to claude. tmux send-keys 'BTab' emits the back-tab key
+ *  sequence (\e[Z), which claude's TUI interprets as the mode-cycle key. */
+function sendShiftTab(tmuxName: string, logger: Logger): boolean {
+  try {
+    execFileSync('tmux', tmuxArgs('send-keys', '-t', tmuxName, 'BTab'), {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    return true
+  } catch (err) {
+    logger.warn({ err, tmuxName }, 'send-keys BTab failed')
+    return false
+  }
+}
+
+/** Cycle the TUI's permission mode (via Shift+Tab) until capture-pane shows
+ *  `target`. The TUI updates within ~100 ms of the keystroke, so we poll
+ *  briefly after each press and break as soon as the mode changes. */
+export async function cycleToPermissionMode(
+  session: Session,
+  target: UserPermissionMode,
+  logger: Logger,
+): Promise<{ ok: boolean; mode: UserPermissionMode | null; reason?: string }> {
+  const tmuxName = tmuxSessionName(session)
+  const start = readLivePermissionMode(session)
+  if (start === null) {
+    return { ok: false, mode: null, reason: 'could not capture tmux pane' }
+  }
+  if (start === target) return { ok: true, mode: target }
+
+  // Safety cap — claude has 4 known cycle modes; 6 leaves room for one extra.
+  const maxAttempts = 6
+  // After each Shift+Tab, poll the pane up to maxWaitMs every pollMs and
+  // break early as soon as the mode changes.
+  const maxWaitMs = 1500
+  const pollMs = 100
+  const seen: (UserPermissionMode | null)[] = [start]
+  let last: UserPermissionMode | null = start
+  for (let i = 0; i < maxAttempts; i++) {
+    if (!sendShiftTab(tmuxName, logger)) {
+      return { ok: false, mode: readLivePermissionMode(session), reason: 'send-keys failed' }
+    }
+    const deadline = Date.now() + maxWaitMs
+    let observed: UserPermissionMode | null = last
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, pollMs))
+      observed = readLivePermissionMode(session)
+      if (observed !== null && observed !== last) break
+    }
+    seen.push(observed)
+    last = observed
+    if (observed === target) {
+      logger.debug(
+        { session: session.name, from: start, to: observed, cycles: i + 1 },
+        'Mode cycled',
+      )
+      return { ok: true, mode: target }
+    }
+  }
+
+  logger.warn(
+    { session: session.name, target, seen },
+    'cycleToPermissionMode exhausted attempts',
+  )
+  return {
+    ok: false,
+    mode: last,
+    reason: `cycled ${maxAttempts}× without reaching ${target} (saw: ${seen.join(' → ')})`,
+  }
+}
 
 export async function killClaude(
   session: Session,

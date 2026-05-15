@@ -7,7 +7,7 @@ import type { MatrixClient } from "matrix-bot-sdk";
 import type Database from "better-sqlite3";
 import type { Logger } from "pino";
 import type { Config } from "./config.js";
-import type { Session, DiscoveredSession } from "./types.js";
+import { USER_PERMISSION_MODES, type Session, type DiscoveredSession, type UserPermissionMode } from "./types.js";
 import {
   getSessionByName,
   getSessionById,
@@ -20,7 +20,8 @@ import {
   nextFreePort,
   releasePort,
 } from "./database.js";
-import { spawnClaude, killClaude } from "./process-manager.js";
+import { spawnClaude, killClaude, readLivePermissionMode, cycleToPermissionMode } from "./process-manager.js";
+import { safeSendHtml } from "./matrix-send.js";
 import { waitForHealth, connectSSE } from "./relay-client.js";
 import { handleSSEEvent } from "./bot.js";
 import { scanSessions } from "./session-scanner.js";
@@ -138,12 +139,12 @@ function handleList(db: Database.Database): string {
   const rows = sessions.map((s) => {
     const dir = s.working_directory.replace(homedir(), "~");
     const shortId = s.id.slice(0, 8);
-    return `| ${s.name} | ${shortId} | ${dir} | ${s.status} | ${timeAgo(s.last_message_at)} |`;
+    return `| ${s.name} | ${shortId} | ${dir} | ${s.status} | ${s.permission_mode} | ${timeAgo(s.last_message_at)} |`;
   });
 
   return [
-    "| Name | ID | Directory | Status | Last activity |",
-    "|------|----|-----------|--------|---------------|",
+    "| Name | ID | Directory | Status | Mode | Last activity |",
+    "|------|----|-----------|--------|------|---------------|",
     ...rows,
   ].join("\n");
 }
@@ -451,26 +452,64 @@ function autoName(workDir: string, db: Database.Database): string {
 
 // --- /new ---
 
+/** Pluck `--mode <value>` (or `--mode=value`) out of args, validating against
+ *  the user-facing mode list. Returns the cleaned positional args + the
+ *  parsed mode (or null if no flag), or an error message. */
+export function extractModeFlag(
+  args: string[],
+): { positional: string[]; mode: UserPermissionMode | null } | string {
+  const positional: string[] = [];
+  let mode: UserPermissionMode | null = null;
+  const allowed = USER_PERMISSION_MODES.join("|");
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--mode") {
+      const next = args[i + 1];
+      if (!next) return `Missing value for --mode. Expected one of: ${allowed}`;
+      if (!(USER_PERMISSION_MODES as readonly string[]).includes(next)) {
+        return `Invalid mode \`${next}\`. Expected one of: ${allowed}`;
+      }
+      mode = next as UserPermissionMode;
+      i++;
+    } else if (a.startsWith("--mode=")) {
+      const next = a.slice("--mode=".length);
+      if (!(USER_PERMISSION_MODES as readonly string[]).includes(next)) {
+        return `Invalid mode \`${next}\`. Expected one of: ${allowed}`;
+      }
+      mode = next as UserPermissionMode;
+    } else {
+      positional.push(a);
+    }
+  }
+
+  return { positional, mode };
+}
+
 function parseNewArgs(
   args: string[],
   config: Config,
   db: Database.Database,
-): { workDir: string; name: string } | string {
-  if (args.length === 0) {
-    return "Usage: `/new <working-dir> [name]` or `/new <name>`";
+): { workDir: string; name: string; mode: UserPermissionMode } | string {
+  const flagResult = extractModeFlag(args);
+  if (typeof flagResult === "string") return flagResult;
+  const { positional, mode } = flagResult;
+
+  if (positional.length === 0) {
+    return "Usage: `/new <working-dir> [name] [--mode default|plan|acceptEdits|auto]`";
   }
 
   let workDir: string;
   let name: string | undefined;
 
-  if (args.length >= 2) {
-    const dir = args[0];
-    const n = args[1];
+  if (positional.length >= 2) {
+    const dir = positional[0];
+    const n = positional[1];
     if (!dir || !n) return "Usage: `/new <working-dir> [name]`";
     workDir = expandTilde(dir);
     name = n;
   } else {
-    const arg = args[0];
+    const arg = positional[0];
     if (!arg) return "Usage: `/new <working-dir> [name]` or `/new <name>`";
     const expanded = expandTilde(arg);
     if (existsSync(expanded)) {
@@ -486,7 +525,7 @@ function parseNewArgs(
   if (!name) name = autoName(workDir, db);
   if (getSessionByName(db, name)) return `Session \`${name}\` already exists. Choose a different name.`;
 
-  return { workDir, name };
+  return { workDir, name, mode: mode ?? "default" };
 }
 
 async function addRoomToSpace(
@@ -520,7 +559,7 @@ async function handleNew(
 ): Promise<string> {
   const parsed = parseNewArgs(args, config, db);
   if (typeof parsed === "string") return parsed;
-  const { workDir, name } = parsed;
+  const { workDir, name, mode } = parsed;
 
   const port = nextFreePort(db, config.ports.start, config.ports.end);
   if (port == null) {
@@ -547,7 +586,7 @@ async function handleNew(
       name,
       working_directory: workDir,
       model: config.claude.model,
-      permission_mode: "default",
+      permission_mode: mode,
       port,
       pid: null,
       status: "spawning",
@@ -598,4 +637,139 @@ async function handleNew(
     // Port is now in DB (or session creation failed); release the reservation.
     releasePort(port);
   }
+}
+
+// --- !mode (in-session bridge command) ---
+//
+// Lives in session rooms so users can switch permission modes without
+// disturbing the running claude. Uses tmux send-keys to cycle the TUI and
+// reads the resulting mode from the session JSONL.
+//
+// `/` is reserved for claude's own slash commands and skills. `:` was
+// considered but conflicts with Element's emoji autocomplete. `!` (mautrix
+// convention) is the only prefix.
+
+const MODE_COMMAND_RE = /^!mode(?:\s+(.*))?$/;
+const MODE_LIST_HTML = "default | plan | acceptEdits | auto";
+
+/** Map user input to a canonical UserPermissionMode. Case-insensitive; also
+ *  accepts the shorter alias `edit` / `edits` for `acceptEdits`. Returns null
+ *  for unknown values. */
+function resolveModeAlias(raw: string): UserPermissionMode | null {
+  const lower = raw.toLowerCase();
+  if (lower === "edit" || lower === "edits" || lower === "acceptedits") return "acceptEdits";
+  for (const m of USER_PERMISSION_MODES) {
+    if (m.toLowerCase() === lower) return m;
+  }
+  return null;
+}
+
+/** Cheap sync check used in the message handler to decide whether to
+ *  intercept before forwarding to claude. */
+export function isModeCommand(body: string): boolean {
+  return MODE_COMMAND_RE.test(body.trim());
+}
+
+/** Handle a session-room `!mode` / `:mode` message. Posts the response into
+ *  the same room. Caller already confirmed this is a mode command. */
+export async function handleModeCommand(
+  body: string,
+  session: Session,
+  client: MatrixClient,
+  db: Database.Database,
+  logger: Logger,
+): Promise<void> {
+  const roomId = session.room_id;
+  if (!roomId) return;
+
+  const match = body.trim().match(MODE_COMMAND_RE);
+  const argRaw = match?.[1]?.trim() ?? "";
+
+  // No args → report current mode
+  if (!argRaw) {
+    if (session.status !== "active") {
+      await safeSendHtml(
+        client,
+        roomId,
+        `<i>Session is <b>${session.status}</b> — current mode is whatever DB says (<b>${session.permission_mode}</b>), but no live terminal to confirm. Use <code>/attach</code> to bring it active.</i>`,
+        logger,
+        "mode:report-inactive",
+      );
+      return;
+    }
+    const current = readLivePermissionMode(session);
+    if (current === null) {
+      await safeSendHtml(
+        client,
+        roomId,
+        `<i>Couldn't read terminal — session may be initializing. DB says: <b>${session.permission_mode}</b>.</i>`,
+        logger,
+        "mode:report-unreadable",
+      );
+      return;
+    }
+    await safeSendHtml(
+      client,
+      roomId,
+      `<i>Mode: <b>${current}</b>. Change with <code>!mode &lt;${MODE_LIST_HTML}&gt;</code>.</i>`,
+      logger,
+      "mode:report",
+    );
+    return;
+  }
+
+  // Validate target — case-insensitive, with `edit` alias for `acceptEdits`
+  const target = resolveModeAlias(argRaw);
+  if (target === null) {
+    await safeSendHtml(
+      client,
+      roomId,
+      `<i>Unknown mode <code>${escapeHtmlMin(argRaw)}</code>. Valid: ${MODE_LIST_HTML} (case-insensitive; <code>edit</code> works for <code>acceptEdits</code>).</i>`,
+      logger,
+      "mode:invalid-arg",
+    );
+    return;
+  }
+
+  if (session.status !== "active") {
+    await safeSendHtml(
+      client,
+      roomId,
+      `<i>Can't switch mode — session is <b>${session.status}</b>. Re-attach in the control room first.</i>`,
+      logger,
+      "mode:not-active",
+    );
+    return;
+  }
+
+  const result = await cycleToPermissionMode(session, target, logger);
+
+  // Always sync the DB to whatever we observed, even on failure — the JSONL
+  // is the source of truth and the DB shouldn't drift away from it.
+  if (result.mode && result.mode !== session.permission_mode) {
+    updateSession(db, session.id, { permission_mode: result.mode });
+  }
+
+  if (result.ok) {
+    await safeSendHtml(
+      client,
+      roomId,
+      `<i>Mode → <b>${target}</b></i>`,
+      logger,
+      "mode:switched",
+    );
+    return;
+  }
+
+  await safeSendHtml(
+    client,
+    roomId,
+    `<i>Couldn't switch to <b>${target}</b>: ${result.reason ?? "unknown reason"}. Current: <b>${result.mode ?? "unknown"}</b>. If this persists, attach to the tmux pane and try Shift+Tab manually.</i>`,
+    logger,
+    "mode:failed",
+  );
+}
+
+function escapeHtmlMin(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

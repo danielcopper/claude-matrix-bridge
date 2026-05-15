@@ -21,7 +21,7 @@ import {
 } from './database.js'
 import { sendPermission, sendMessage, waitForHealth, connectSSE } from './relay-client.js'
 import { spawnClaude, killClaude } from './process-manager.js'
-import { handleCommand } from './command-handler.js'
+import { handleCommand, isModeCommand, handleModeCommand } from './command-handler.js'
 import { formatMarkdown, splitMessage } from './message-formatter.js'
 import { buildReplay } from './replay.js'
 import {
@@ -505,6 +505,20 @@ function handleSessionRoomMessage(
   logger: Logger,
 ): void {
   if (tryTextPermissionVerdict(body, session, db, client, roomId, logger)) return
+
+  // Bridge slash-equivalents (!mode / :mode) — intercept before forwarding to
+  // claude so claude doesn't see them as regular messages. Only exact prefix
+  // matches are intercepted; typos like !modus fall through to claude.
+  if (isModeCommand(body)) {
+    void (async () => {
+      try {
+        await handleModeCommand(body, session, client, db, logger)
+      } catch (err) {
+        logger.error({ err, session: session.name }, 'Mode command failed')
+      }
+    })()
+    return
+  }
 
   if (session.status === 'archived') {
     void safeSendText(client, roomId, `Session archived. Use \`/attach ${session.name}\` in control room.`, logger, 'room:archived')
